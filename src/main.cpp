@@ -84,7 +84,7 @@ constexpr char OTA_HOST[] = "cfc-chamber";
 constexpr uint32_t OTA_TRIAL_MS = 60000;      // new firmware must run cleanly this long
 // Updates from the internet: the newest GitHub Release of this repository.
 // Bump FW_VERSION and tag the release to match (1.0.1 -> tag v1.0.1).
-constexpr char FW_VERSION[] = "1.0.1";
+constexpr char FW_VERSION[] = "1.0.2";
 constexpr char GH_REPO[]    = "Inton1701/smart-cfc";
 
 #if CFC_SIM
@@ -984,6 +984,8 @@ public:
     // `saved` flashes a confirmation on the setup screen after a SEL tap.
     void render(const Controller& c, bool heaterOn, bool saved);
     void splash(float progress);        // power-on screen, 0..1 fills the bar
+    // Firmware install screen. progress < 0: size unknown, show `kb` received.
+    void updating(float progress, unsigned kb = 0);
 
 private:
     static constexpr uint16_t ON  = SSD1306_WHITE;
@@ -1187,6 +1189,24 @@ void Ui::fingerprint(int x, int y) {
 }
 
 // ---------------- screens ----------------
+
+void Ui::updating(float progress, unsigned kb) {
+    char buf[24];
+    d_.clearDisplay();
+    text(0, 0, "UPDATING", 2);
+    text(0, 28, "Don't turn off");
+    rrect(0, 54, 98, 10);
+    if (progress >= 0.0f) {
+        const int w = static_cast<int>(94.0f * (progress > 1.0f ? 1.0f : progress));
+        if (w > 0) d_.fillRect(2, 56, w, 6, ON);
+        snprintf(buf, sizeof(buf), "%d%%", static_cast<int>(progress * 100.0f));
+    } else {
+        d_.fillRect(2 + static_cast<int>((millis() / 100) % 80), 56, 14, 6, ON);   // moving block
+        snprintf(buf, sizeof(buf), "%uK", kb);
+    }
+    rightText(55, buf);
+    d_.display();
+}
 
 void Ui::splash(float progress) {
     d_.clearDisplay();
@@ -1454,6 +1474,7 @@ a{color:var(--accent)}
   <div class="mute">Version <span id="ver">-</span>, build <span id="fw"></span></div>
   <div class="grid2"><button id="chk" type="button">Check for update</button><button id="ins" type="button" hidden>Install</button></div>
   <div class="mute" id="ghmsg"></div>
+  <div class="warn"><b>Don't turn off while updating.</b></div>
   <div class="mute"><a href="/update">Upload a firmware file instead</a></div>
 </div>
 </main>
@@ -1517,6 +1538,7 @@ static const char UPDATE_PAGE[] PROGMEM = R"HTML(<!doctype html>
 button{font:inherit;padding:10px 16px}</style></head><body>
 <h1>Firmware update</h1>
 <p>Choose the <b>firmware.bin</b> file built by PlatformIO (.pio/build/esp32dev/firmware.bin). The heater stays off while it installs, then the chamber restarts.</p>
+<p style="border:2px solid #c0392b;border-radius:8px;padding:10px;color:#c0392b"><b>Don't turn off while updating.</b></p>
 <form method="POST" action="/update" enctype="multipart/form-data">
 <input type="file" name="firmware" accept=".bin" required> <button type="submit">Install</button></form>
 <p><a href="/">Back</a></p></body></html>)HTML";
@@ -1658,7 +1680,7 @@ static void handleGhInstall() {
         return;
     }
     ghInstallRequest = true;   // done in loop(), after this reply has been sent
-    web.send(200, "text/plain", "Downloading. The chamber restarts when it is done.");
+    web.send(200, "text/plain", "Updating. Don't turn off.");
 }
 
 // Blocking download + install. Progress shows on the OLED splash bar.
@@ -1674,7 +1696,7 @@ static void runGhInstall() {
     httpUpdate.onProgress([](int done, int total) {
         static int lastPct = -1;
         const int pct = total > 0 ? static_cast<int>(100LL * done / total) : 0;
-        if (uiOk && pct / 5 != lastPct / 5) { ui.splash(pct / 100.0f); lastPct = pct; }   // ~20 redraws
+        if (uiOk && pct / 5 != lastPct / 5) { ui.updating(pct / 100.0f); lastPct = pct; }   // ~20 redraws
     });
     char url[112];
     snprintf(url, sizeof(url), "https://github.com/%s/releases/latest/download/firmware.bin", GH_REPO);
@@ -1731,8 +1753,14 @@ static void startNetwork() {
             otaActive = true;
             heater.forceOff();
             Update.begin(UPDATE_SIZE_UNKNOWN);
+            if (uiOk) ui.updating(-1.0f, 0);
         } else if (up.status == UPLOAD_FILE_WRITE) {
             if (Update.isRunning()) Update.write(up.buf, up.currentSize);
+            static size_t shownKb = 0;   // redraw every 32 KB: an I2C frame costs ~100 ms
+            if (uiOk && up.totalSize / 32768 != shownKb / 32) {
+                shownKb = up.totalSize / 1024;
+                ui.updating(-1.0f, static_cast<unsigned>(shownKb));
+            }
         } else if (up.status == UPLOAD_FILE_END) {
             if (Update.isRunning()) Update.end(true);
         } else if (up.status == UPLOAD_FILE_ABORTED) {
@@ -1745,7 +1773,12 @@ static void startNetwork() {
     // Wireless upload from PlatformIO (env:esp32dev_ota).
     ArduinoOTA.setHostname(OTA_HOST);
     ArduinoOTA.onStart([] { otaActive = true; heater.forceOff(); fanSet(false); });
-    ArduinoOTA.onProgress([](unsigned int, unsigned int) { esp_task_wdt_reset(); });
+    ArduinoOTA.onProgress([](unsigned int done, unsigned int total) {
+        esp_task_wdt_reset();
+        static int lastPct = -1;
+        const int pct = total ? static_cast<int>(100ULL * done / total) : 0;
+        if (uiOk && pct / 5 != lastPct / 5) { ui.updating(pct / 100.0f); lastPct = pct; }
+    });
     ArduinoOTA.onError([](ota_error_t) { otaActive = false; });
     ArduinoOTA.begin();
 }
