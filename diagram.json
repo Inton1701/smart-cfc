@@ -1,0 +1,69 @@
+{
+  "version": 1,
+  "author": "Inton1701",
+  "editor": "wokwi",
+  "parts": [
+    { "type": "wokwi-esp32-devkit-v1", "id": "esp", "top": 0, "left": 0, "attrs": {} },
+
+    { "type": "board-ssd1306", "id": "oled", "top": -160, "left": 180,
+      "attrs": { "i2cAddress": "0x3c" } },
+
+    { "type": "wokwi-relay-module", "id": "ssr", "top": -110, "left": -300, "attrs": {} },
+    { "type": "wokwi-relay-module", "id": "fan", "top": -20, "left": -300, "attrs": {} },
+
+    { "type": "wokwi-buzzer", "id": "bz", "top": -170, "left": 60, "attrs": { "volume": "0.1" } },
+
+    { "type": "wokwi-pushbutton", "id": "btnInc", "top": 250, "left": -360,
+      "attrs": { "color": "green", "label": "INC", "bounce": "1" } },
+    { "type": "wokwi-pushbutton", "id": "btnDec", "top": 250, "left": -240,
+      "attrs": { "color": "green", "label": "DEC", "bounce": "1" } },
+    { "type": "wokwi-pushbutton", "id": "btnNext", "top": 250, "left": -120,
+      "attrs": { "color": "blue", "label": "NEXT", "bounce": "1" } },
+    { "type": "wokwi-pushbutton", "id": "btnStore", "top": 250, "left": 0,
+      "attrs": { "color": "blue", "label": "STORE", "bounce": "1" } },
+    { "type": "wokwi-pushbutton", "id": "btnSel", "top": 250, "left": 120,
+      "attrs": { "color": "red", "label": "SEL", "bounce": "1" } },
+
+    { "type": "wokwi-potentiometer", "id": "pot", "top": 60, "left": 260, "attrs": {} },
+
+    { "type": "wokwi-text", "id": "note1", "top": -230, "left": -300,
+      "attrs": { "text": "Top relay stands in for the SSR-40DA (heater). Bottom relay switches the fan.\nAC side is not simulated.", "fontSize": "13" } },
+    { "type": "wokwi-text", "id": "note2", "top": 20, "left": 260,
+      "attrs": { "text": "Fault knob (sim only):\nfull CCW = open thermocouple\nfull CW  = force overtemp trip\nmid      = normal, thermal model runs", "fontSize": "13" } },
+    { "type": "wokwi-text", "id": "note3", "top": 200, "left": 260,
+      "attrs": { "text": "No MAX6675 part exists in Wokwi.\nBuild env:sim swaps in a thermal model.", "fontSize": "13" } }
+  ],
+  "connections": [
+    [ "esp:D21", "oled:SDA", "green", [] ],
+    [ "esp:D22", "oled:SCL", "green", [] ],
+    [ "esp:3V3", "oled:VCC", "red",   [] ],
+    [ "esp:GND.1", "oled:GND", "black", [] ],
+
+    [ "esp:D25", "ssr:IN",  "orange", [] ],
+    [ "esp:VIN", "ssr:VCC", "red",    [] ],
+    [ "esp:GND.2", "ssr:GND", "black", [] ],
+
+    [ "esp:D23", "fan:IN",  "brown", [] ],
+    [ "esp:VIN", "fan:VCC", "red",   [] ],
+    [ "esp:GND.2", "fan:GND", "black", [] ],
+
+    [ "esp:D4", "bz:2", "purple", [] ],
+    [ "esp:GND.1", "bz:1", "black", [] ],
+
+    [ "esp:D32", "btnInc:1.l",   "purple", [] ],
+    [ "esp:D33", "btnDec:1.l",   "purple", [] ],
+    [ "esp:D26", "btnNext:1.l",  "purple", [] ],
+    [ "esp:D27", "btnStore:1.l", "purple", [] ],
+    [ "esp:D13", "btnSel:1.l",   "purple", [] ],
+
+    [ "btnInc:2.l",   "esp:GND.2", "black", [] ],
+    [ "btnDec:2.l",   "esp:GND.2", "black", [] ],
+    [ "btnNext:2.l",  "esp:GND.2", "black", [] ],
+    [ "btnStore:2.l", "esp:GND.2", "black", [] ],
+    [ "btnSel:2.l",   "esp:GND.2", "black", [] ],
+
+    [ "esp:D34", "pot:SIG", "gray",  [] ],
+    [ "esp:3V3", "pot:VCC", "red",   [] ],
+    [ "esp:GND.1", "pot:GND", "black", [] ]
+  ]
+}
