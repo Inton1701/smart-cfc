@@ -30,8 +30,8 @@
 //
 // Heater: 220 V AC 300 W heating pad, switched by the SSR-40DA.
 // Nothing in the pad is trusted to limit its own temperature: software trips
-// at 70 C, and the thermal fuses on the plate are the backstop if the firmware
-// or the SSR fails.
+// at 200 C, and the thermal fuses on the plate (rated above the trip, below
+// ~220 C) are the backstop if the firmware or the SSR fails.
 //
 // MAINS IN THE CHAMBER. Three hardware items are not optional -- see README:
 //   1. Thermal fuses bonded to the plate, in series with the AC line.
@@ -84,7 +84,7 @@ constexpr char OTA_HOST[] = "cfc-chamber";
 constexpr uint32_t OTA_TRIAL_MS = 60000;      // new firmware must run cleanly this long
 // Updates from the internet: the newest GitHub Release of this repository.
 // Bump FW_VERSION and tag the release to match (1.0.1 -> tag v1.0.1).
-constexpr char FW_VERSION[] = "1.0.3";
+constexpr char FW_VERSION[] = "1.0.4";
 constexpr char GH_REPO[]    = "Inton1701/smart-cfc";
 
 #if CFC_SIM
@@ -103,11 +103,12 @@ constexpr bool     FAN_RELAY_ACTIVE_HIGH = false;
 constexpr int PIN_SIM_POT = 34;   // sim build only: fault-injection knob (ADC1)
 
 // ---------- Process limits ----------
-// CA fumes at roughly 45-55 C. Hotter over-develops the print (white frosting)
-// and past ~83 C the glue is above its flash point.
+// The probe sits at the glue cup on the hot plate. Plate sweet spot for
+// cyanoacrylate fuming is about 120-150 C; above ~220 C the glue breaks down
+// and releases hydrogen cyanide, which the safety trip below keeps far off.
 constexpr float TARGET_MIN_C     = 30.0f;
-constexpr float TARGET_MAX_C     = 60.0f;
-constexpr float TARGET_DEFAULT_C = 49.0f;
+constexpr float TARGET_MAX_C     = 180.0f;
+constexpr float TARGET_DEFAULT_C = 130.0f;
 constexpr float TARGET_STEP_C    = 1.0f;
 
 constexpr uint16_t DURATION_MIN_MIN     = 1;
@@ -116,8 +117,8 @@ constexpr uint16_t DURATION_DEFAULT_MIN = 20;
 constexpr uint16_t DURATION_STEP_MIN    = 1;
 
 // ---------- Safety ----------
-constexpr float SAFETY_MAX_C   = 70.0f;  // software trip, any state, latching
-constexpr float SAFETY_REARM_C = 55.0f;  // must cool past this before trip clears
+constexpr float SAFETY_MAX_C   = 200.0f; // software trip, any state, latching; 20 C above max target
+constexpr float SAFETY_REARM_C = 150.0f; // must cool past this before trip clears
 constexpr uint8_t FAULT_STRIKES = 3;     // consecutive bad reads before fault latch
 
 // Heater cannot reach target within this long -> fault. Catches a dead element,
@@ -1239,9 +1240,11 @@ void Ui::drawSetup(const Controller& c, uint32_t f, bool saved) {
         if (i == 0) {
             thermo(cx - 3, 17, thermoLevel(c.targetC()), col);
             snprintf(buf, sizeof(buf), "%d", static_cast<int>(c.targetC()));
-            const int w = textWidth(buf, 2) + 2 + textWidth("^C");
+            // Three digits fill the 42 px tile, so the unit is shown only below 100.
+            const bool unit = c.targetC() < 100.0f;
+            const int w = textWidth(buf, 2) + (unit ? 2 + textWidth("^C") : 0);
             const int x = text(cx - w / 2, 34, buf, 2, col);
-            text(x, 41, "^C", 1, col);
+            if (unit) text(x, 41, "^C", 1, col);
         } else if (i == 1) {
             hourglass(cx - 4, 17, sel ? static_cast<int>((f / 2) % 4) : 0, col);
             snprintf(buf, sizeof(buf), "%u", static_cast<unsigned>(c.durationMin()));
@@ -1453,7 +1456,7 @@ a{color:var(--accent)}
 <form class="card" id="set">
   <h2>Settings</h2>
   <div class="grid2">
-    <label for="t">Target (&deg;C, 30-60)<input id="t" type="number" min="30" max="60" step="1" required></label>
+    <label for="t">Target (&deg;C, 30-180)<input id="t" type="number" min="30" max="180" step="1" required></label>
     <label for="m">Time (min, 1-240)<input id="m" type="number" min="1" max="240" step="1" required></label>
   </div>
   <label for="f" style="display:flex;gap:8px;align-items:center"><input id="f" type="checkbox"> Fan on during the cycle</label>
@@ -1586,7 +1589,7 @@ static void handleSettings() {
     const float t = web.arg("target").toFloat();
     const long  m = web.arg("minutes").toInt();
     if (t < TARGET_MIN_C || t > TARGET_MAX_C || m < DURATION_MIN_MIN || m > DURATION_MAX_MIN) {
-        web.send(400, "text/plain", "Target must be 30-60 C and time 1-240 min.");
+        web.send(400, "text/plain", "Target must be 30-180 C and time 1-240 min.");
         return;
     }
     ctrl.setSettings(t, static_cast<uint16_t>(m), web.arg("fan") == "1");
