@@ -84,7 +84,7 @@ constexpr char OTA_HOST[] = "cfc-chamber";
 constexpr uint32_t OTA_TRIAL_MS = 60000;      // new firmware must run cleanly this long
 // Updates from the internet: the newest GitHub Release of this repository.
 // Bump FW_VERSION and tag the release to match (1.0.1 -> tag v1.0.1).
-constexpr char FW_VERSION[] = "1.0.9";
+constexpr char FW_VERSION[] = "1.0.10";
 constexpr char GH_REPO[]    = "Inton1701/smart-cfc";
 
 #if CFC_SIM
@@ -160,14 +160,15 @@ constexpr uint32_t BTN_DEBOUNCE_MS     = 30;
 constexpr uint32_t BTN_LONGPRESS_MS    = 1000; // hold SEL this long to begin
 constexpr uint32_t BTN_REPEAT_DELAY_MS = 500;
 constexpr uint32_t BTN_REPEAT_RATE_MS  = 120;
-constexpr uint32_t COMPLETE_SCREEN_MS  = 5000;
+constexpr float    HOT_WARN_C          = 50.0f; // plate this hot or hotter: show a do-not-touch warning
 constexpr uint32_t SAVED_FLASH_MS      = 1500; // "SAVED" on the setup screen after a SEL tap
 constexpr uint32_t WDT_TIMEOUT_S       = 5;
 
 // ---------- Buzzer ----------
 constexpr uint32_t BEEP_KEY_MS  = 40;    // every key press
 constexpr uint32_t BEEP_BOOT_MS = 120;   // power-on: two of these
-constexpr uint32_t BEEP_DONE_MS = 3000;  // cycle complete: one long beep
+constexpr uint32_t BEEP_DONE_MS = 1000;  // cycle complete: long beep on ...
+constexpr uint32_t BEEP_DONE_PERIOD_MS = 2000;  // ... then off, repeating until a key is pressed
 
 // ============================================================
 // Temperature source interface
@@ -336,7 +337,6 @@ private:
     uint32_t remainingMs_      = 0;
     uint32_t preheatElapsedMs_ = 0;
     float    preheatStartC_    = 0.0f;
-    uint32_t completeElapsedMs_ = 0;
     uint32_t lastSampleMs_    = 0;
     bool     hasLastSample_   = false;
 };
@@ -369,7 +369,6 @@ void Controller::enterIdle() {
     duty_  = 0.0f;
     remainingMs_       = 0;
     preheatElapsedMs_  = 0;
-    completeElapsedMs_ = 0;
     pid_.reset();
 }
 
@@ -386,7 +385,6 @@ void Controller::startCycle(uint32_t nowMs) {
     remainingMs_       = static_cast<uint32_t>(durationMin_) * 60UL * 1000UL;
     preheatElapsedMs_  = 0;
     preheatStartC_     = tempC_;
-    completeElapsedMs_ = 0;
     pid_.reset();
     hasLastSample_ = false;
     state_ = TIMER_STARTS_AFTER_PREHEAT ? State::Preheat : State::Running;
@@ -483,7 +481,6 @@ void Controller::update(uint32_t nowMs, const TempReading& reading,
         if (dtMs >= remainingMs_) {
             remainingMs_       = 0;
             duty_              = 0.0f;
-            completeElapsedMs_ = 0;
             state_             = State::Complete;
             pid_.reset();
         } else {
@@ -493,9 +490,8 @@ void Controller::update(uint32_t nowMs, const TempReading& reading,
 
     case State::Complete:
         duty_ = 0.0f;
-        completeElapsedMs_ += dtMs;
-        if (completeElapsedMs_ >= COMPLETE_SCREEN_MS ||
-            ev.selTap || ev.selHold || ev.nextTap || ev.prevTap ||
+        // Stays (and keeps beeping) until someone presses a key.
+        if (ev.selTap || ev.selHold || ev.nextTap || ev.prevTap ||
             ev.incStep || ev.decStep) {
             enterIdle();
         }
@@ -1221,6 +1217,9 @@ void Ui::splash(float progress) {
 void Ui::drawSetup(const Controller& c, uint32_t f, bool saved) {
     char buf[16];
     if (saved) { rfill(0, 0, textWidth("SAVED") + 6, 9); text(3, 1, "SAVED", 1, OFF); }
+    else if (c.tempValid() && c.tempC() >= HOT_WARN_C) {   // plate still hot: blink a warning
+        if (f % 2 == 0) { rfill(0, 0, textWidth("HOT!") + 6, 9); text(3, 1, "HOT!", 1, OFF); }
+    }
     else       text(0, 1, "SETUP");
     thermo(82, 0, thermoLevel(c.tempC()));
     if (c.tempValid()) snprintf(buf, sizeof(buf), "%.1f^C", c.tempC());
@@ -1297,14 +1296,19 @@ void Ui::drawComplete(const Controller& c, uint32_t f) {
     char buf[20];
     bitmap(4, 14, CHECK, 9, ON, 3);
     text(48, 8, "DONE", 2);
-    text(48, 28, "heater off");
-    snprintf(buf, sizeof(buf), "%u min cycle", static_cast<unsigned>(c.durationMin()));
+    if (c.tempValid() && c.tempC() >= HOT_WARN_C && f % 4 != 3) {   // blinking warning
+        text(48, 28, "PLATE HOT!");
+        snprintf(buf, sizeof(buf), "%d^C, no touch", static_cast<int>(c.tempC()));
+    } else {
+        text(48, 28, "heater off");
+        snprintf(buf, sizeof(buf), "%u min cycle", static_cast<unsigned>(c.durationMin()));
+    }
     text(48, 38, buf);
     const int sx = (f % 2) ? 42 : 2, sy = (f % 2) ? 10 : 44;   // sparkle hops
     d_.drawPixel(sx, sy, ON); d_.drawPixel(sx - 1, sy + 1, ON);
     d_.drawPixel(sx + 1, sy + 1, ON); d_.drawPixel(sx, sy + 2, ON);
     d_.drawFastHLine(0, 52, 128, ON);
-    centerText(56, "any key: setup");
+    centerText(56, "press any key");
 }
 
 void Ui::drawFault(const Controller& c, uint32_t f) {
@@ -1494,6 +1498,7 @@ async function tick(){
     $('time').textContent=s.state==='Running'?mmss(s.remaining)+' left':s.state==='Preheat'?'timer starts at temperature':'';
     $('io').textContent='heater '+(s.heater?'on':'off')+' · fan '+(s.fan?'on':'off');
     $('fault').textContent=s.fault?('Fault: '+s.fault):'';
+    $('hot').hidden=!s.hot;if(s.hot)$('hot').innerHTML='<b>Heating plate is still hot ('+s.temp.toFixed(0)+'&deg;C). Do not touch.</b>';
     $('fw').textContent=s.fw+(s.trial?' (on trial)':'');
     const busy=s.state==='Preheat'||s.state==='Running';
     $('stop').hidden=!busy;
@@ -1563,7 +1568,7 @@ static void handleStatus() {
              "{\"state\":\"%s\",\"temp\":%.2f,\"valid\":%s,\"target\":%d,\"minutes\":%u,"
              "\"fan_enabled\":%s,\"fan\":%s,\"heater\":%s,\"remaining\":%lu,\"progress\":%d,"
              "\"fault\":\"%s\",\"fw\":\"%s\",\"trial\":%s,\"heap\":%u,\"minheap\":%u,"
-             "\"ver\":\"%s\",\"sta\":%s,\"ssid\":\"%s\",\"ip\":\"%s\",\"ghmsg\":\"%s\"}",
+             "\"ver\":\"%s\",\"sta\":%s,\"ssid\":\"%s\",\"ip\":\"%s\",\"ghmsg\":\"%s\",\"hot\":%s}",
              stateName(st), ctrl.tempC(), ctrl.tempValid() ? "true" : "false",
              static_cast<int>(ctrl.targetC()), static_cast<unsigned>(ctrl.durationMin()),
              ctrl.fanEnabled() ? "true" : "false", fanOn ? "true" : "false",
@@ -1574,7 +1579,8 @@ static void handleStatus() {
              FW_BUILD, otaTrial ? "true" : "false",
              static_cast<unsigned>(ESP.getFreeHeap()), static_cast<unsigned>(ESP.getMinFreeHeap()),
              FW_VERSION, sta ? "true" : "false", sta ? WiFi.SSID().c_str() : "",
-             sta ? WiFi.localIP().toString().c_str() : "", ghMessage);
+             sta ? WiFi.localIP().toString().c_str() : "", ghMessage,
+             (ctrl.tempValid() && ctrl.tempC() >= HOT_WARN_C) ? "true" : "false");
     web.send(200, "application/json", buf);
 }
 
@@ -1886,8 +1892,12 @@ void loop() {
     // the plate after an over-temperature trip.
     fanSet(ctrl.fanEnabled() && (heating || st == State::SafetyTrip));
 
-    if (st == State::Complete && lastState != State::Complete) {
+    // Cycle done: long beep, pause, repeat until a key leaves the Complete screen.
+    static uint32_t lastDoneBeepMs = 0;
+    if (st == State::Complete &&
+        (lastState != State::Complete || now - lastDoneBeepMs >= BEEP_DONE_PERIOD_MS)) {
         buzzer.beep(now, BEEP_DONE_MS);
+        lastDoneBeepMs = now;
     }
     lastState = st;
     buzzer.service(now);

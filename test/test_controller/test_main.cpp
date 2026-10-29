@@ -146,8 +146,6 @@ static void test_countdown_runs_out_and_turns_the_heater_off() {
     tickT(TARGET_DEFAULT_C, 250);
     TEST_ASSERT_EQUAL(static_cast<int>(State::Running), static_cast<int>(c.state()));
 
-    // Exactly the cycle length: one tick more and the Complete screen's
-    // 5 s auto-return would already have taken us back to Idle.
     for (int i = 0; i < DURATION_DEFAULT_MIN; ++i) tickT(TARGET_DEFAULT_C, 60000);
 
     TEST_ASSERT_EQUAL(static_cast<int>(State::Complete), static_cast<int>(c.state()));
@@ -155,16 +153,20 @@ static void test_countdown_runs_out_and_turns_the_heater_off() {
     TEST_ASSERT_EQUAL_FLOAT(0.0f, c.dutyPct());
 }
 
-static void test_complete_screen_returns_to_idle() {
+static void test_complete_screen_waits_for_a_key() {
     ButtonEvents hold; hold.selHold = true;
     tickT(30.0f, 250, hold);
     tickT(TARGET_DEFAULT_C, 250);
-    // Exactly the cycle length: one tick more and the Complete screen's
-    // 5 s auto-return would already have taken us back to Idle.
     for (int i = 0; i < DURATION_DEFAULT_MIN; ++i) tickT(TARGET_DEFAULT_C, 60000);
     TEST_ASSERT_EQUAL(static_cast<int>(State::Complete), static_cast<int>(c.state()));
 
-    tickT(TARGET_DEFAULT_C, COMPLETE_SCREEN_MS + 100);
+    // No timeout: the done alarm keeps going until someone presses a key.
+    tickT(TARGET_DEFAULT_C, 10UL * 60UL * 1000UL);
+    TEST_ASSERT_EQUAL(static_cast<int>(State::Complete), static_cast<int>(c.state()));
+    TEST_ASSERT_EQUAL_FLOAT(0.0f, c.dutyPct());
+
+    ButtonEvents key; key.decStep = true;
+    tickT(TARGET_DEFAULT_C, 250, key);
     TEST_ASSERT_EQUAL(static_cast<int>(State::Idle), static_cast<int>(c.state()));
 }
 
@@ -323,7 +325,7 @@ int main(int, char**) {
     RUN_TEST(test_hold_refused_without_a_valid_reading);
     RUN_TEST(test_preheat_heats_then_hands_over_to_running);
     RUN_TEST(test_countdown_runs_out_and_turns_the_heater_off);
-    RUN_TEST(test_complete_screen_returns_to_idle);
+    RUN_TEST(test_complete_screen_waits_for_a_key);
     RUN_TEST(test_sel_stops_from_preheat_and_running);
     RUN_TEST(test_overtemp_latches_and_will_not_clear_while_hot);
     RUN_TEST(test_overtemp_trips_even_from_idle);
