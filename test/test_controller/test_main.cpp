@@ -283,9 +283,9 @@ static void test_duty_is_capped_and_never_negative() {
     TEST_ASSERT_EQUAL_FLOAT(0.0f, c.dutyPct());
 }
 
-// Real chamber: cutting power at 85 C let the reading coast to 100 C, because
-// the probe at the cup lags the 300 W pad. Model that lag and check the
-// controller now eases off early enough.
+// Real chamber: cutting power at 61 C still let the reading coast to 107 C for
+// an 85 C target. Model fitted to that run: pad 40 J/K, loss 0.6 W/K, probe
+// lag 66 s. Check the controller now arrives without coasting past.
 static float simulatePeak(float target) {
     c.setSettings(target, 20);
     ButtonEvents hold; hold.selHold = true;
@@ -293,8 +293,8 @@ static float simulatePeak(float target) {
     tickT(probe, 250, hold);
     for (int i = 0; i < 4 * 900; ++i) {                  // 15 min in 250 ms steps
         const float watts = 300.0f * c.dutyPct() / 100.0f;
-        pad   += (watts - 1.2f * (pad - 30.0f)) / 300.0f * 0.25f;
-        probe += (pad - probe) / 20.0f * 0.25f;          // 20 s probe lag
+        pad   += (watts - 0.6f * (pad - 30.0f)) / 40.0f * 0.25f;
+        probe += (pad - probe) / 66.0f * 0.25f;          // 66 s probe lag
         const float reading = floorf(probe * 4.0f) / 4.0f;   // MAX6675 0.25 C steps
         tickT(reading, 250);
         if (reading > peak) peak = reading;

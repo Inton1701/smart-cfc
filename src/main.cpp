@@ -84,7 +84,7 @@ constexpr char OTA_HOST[] = "cfc-chamber";
 constexpr uint32_t OTA_TRIAL_MS = 60000;      // new firmware must run cleanly this long
 // Updates from the internet: the newest GitHub Release of this repository.
 // Bump FW_VERSION and tag the release to match (1.0.1 -> tag v1.0.1).
-constexpr char FW_VERSION[] = "1.0.5";
+constexpr char FW_VERSION[] = "1.0.6";
 constexpr char GH_REPO[]    = "Inton1701/smart-cfc";
 
 #if CFC_SIM
@@ -130,17 +130,19 @@ constexpr uint32_t PREHEAT_TIMEOUT_MS = 15UL * 60UL * 1000UL;
 // spec behaviour (countdown begins the instant Set/Start is pressed).
 constexpr bool TIMER_STARTS_AFTER_PREHEAT = true;
 
-// The pad keeps heating after it is switched off: the probe at the cup lags
-// the pad, so cutting power at the target overshot 85 C to 100 C. The D term
-// looks ahead PID_KD / PID_KP seconds (here 15 s) on the rate of rise and
-// eases off early. The rate is smoothed over PID_D_FILTER_S because the
-// MAX6675 reads in 0.25 C steps. Still overshooting: raise PID_KD.
-// Stalling below target: lower it.
-constexpr float PID_KP = 6.0f;    // percent per degC
-constexpr float PID_KI = 0.02f;   // percent per degC per second
-constexpr float PID_KD = 90.0f;   // percent-seconds per degC
+// Tuned on a model fitted to a real 85 C run (pad ~40 J/K, probe lag ~66 s,
+// loss ~0.6 W/K): at full power the pad heats ~7 C/s and runs far ahead of
+// the probe, so the reading coasted 61 C -> 107 C with the heater already off.
+// Fix: cap power at 40 % (120 W, still enough for 180 C), and look ahead
+// PID_KD / PID_KP = 60 s on a smoothed rate of rise. Simulated worst case over
+// probe lag 50-90 s and pad 30-60 J/K: 1.25 C overshoot, pad <= 155 C.
+// Still overshooting: raise PID_KD. Too slow / stalls low: raise DUTY_MAX_PCT.
+// Moving the probe tight against the pad shortens the lag and helps most.
+constexpr float PID_KP = 1.0f;    // percent per degC
+constexpr float PID_KI = 0.003f;  // percent per degC per second
+constexpr float PID_KD = 60.0f;   // percent-seconds per degC
 constexpr float PID_D_FILTER_S = 4.0f;  // time constant of the rate smoothing
-constexpr float DUTY_MAX_PCT = 100.0f;
+constexpr float DUTY_MAX_PCT = 40.0f;
 
 // Time-proportional output: PID commands a duty percent, this window converts
 // it to on/off time. 1 s window suits a thermal load with minutes of lag.
