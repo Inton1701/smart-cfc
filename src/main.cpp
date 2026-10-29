@@ -84,7 +84,7 @@ constexpr char OTA_HOST[] = "cfc-chamber";
 constexpr uint32_t OTA_TRIAL_MS = 60000;      // new firmware must run cleanly this long
 // Updates from the internet: the newest GitHub Release of this repository.
 // Bump FW_VERSION and tag the release to match (1.0.1 -> tag v1.0.1).
-constexpr char FW_VERSION[] = "1.0.6";
+constexpr char FW_VERSION[] = "1.0.7";
 constexpr char GH_REPO[]    = "Inton1701/smart-cfc";
 
 #if CFC_SIM
@@ -133,14 +133,16 @@ constexpr bool TIMER_STARTS_AFTER_PREHEAT = true;
 // Tuned on a model fitted to a real 85 C run (pad ~40 J/K, probe lag ~66 s,
 // loss ~0.6 W/K): at full power the pad heats ~7 C/s and runs far ahead of
 // the probe, so the reading coasted 61 C -> 107 C with the heater already off.
-// Fix: cap power at 40 % (120 W, still enough for 180 C), and look ahead
-// PID_KD / PID_KP = 60 s on a smoothed rate of rise. Simulated worst case over
-// probe lag 50-90 s and pad 30-60 J/K: 1.25 C overshoot, pad <= 155 C.
-// Still overshooting: raise PID_KD. Too slow / stalls low: raise DUTY_MAX_PCT.
+// Classic PID either overshot (strong integral) or stalled 3.5 C short (weak
+// integral, real 85 C run). Fix: proportional-on-measurement (see class Pid),
+// power capped at 40 % (120 W, still enough for 180 C). Simulated over pad
+// 30-60 J/K, probe lag 50-90 s, loss 0.44-0.6 W/K, targets 85 and 150 C:
+// 0 C overshoot, within +/-2 C by 430 s, pad <= 158 C.
+// Overshoots: raise PID_KP. Settles too slowly: raise PID_KI.
 // Moving the probe tight against the pad shortens the lag and helps most.
-constexpr float PID_KP = 1.0f;    // percent per degC
-constexpr float PID_KI = 0.003f;  // percent per degC per second
-constexpr float PID_KD = 60.0f;   // percent-seconds per degC
+constexpr float PID_KP = 2.0f;    // percent per degC of rise (brake)
+constexpr float PID_KI = 0.02f;   // percent per degC per second
+constexpr float PID_KD = 40.0f;   // percent-seconds per degC
 constexpr float PID_D_FILTER_S = 4.0f;  // time constant of the rate smoothing
 constexpr float DUTY_MAX_PCT = 40.0f;
 
@@ -193,66 +195,50 @@ public:
 // PID
 // ============================================================
 
-// PID with derivative-on-measurement (no setpoint kick on a target change)
-// and conditional-integration anti-windup (the integral stops accumulating
-// while the output is saturated, so it cannot wind up during a long preheat).
+// PID in the "proportional on measurement" form (Brett Beauregard's Arduino PID
+// library, P_ON_M), the usual cure for overshoot on heaters. The integral
+// carries the output; the P term only pulls it down as the temperature rises,
+// so a long warm-up cannot wind up a push past the target. Clamping the sum to
+// the output range is the anti-windup. D acts on a smoothed rate of rise.
 class Pid {
 public:
     Pid(float kp, float ki, float kd, float outMin, float outMax)
         : kp_(kp), ki_(ki), kd_(kd), outMin_(outMin), outMax_(outMax) {}
 
     void reset();
-    // dtSec <= 0 returns the proportional term only; safe to call on the
-    // first sample or after a stall.
+    // dtSec <= 0 (first sample, or after a stall) only records the reading.
     float update(float setpoint, float measured, float dtSec);
 
-    float integral() const { return integral_; }
+    float integral() const { return sum_; }
 
 private:
     // Not const: a const member would delete copy-assignment, and the unit
     // tests reset state with `c = Controller()`.
     float kp_, ki_, kd_, outMin_, outMax_;
-    float integral_  = 0.0f;
+    float sum_       = 0.0f;   // integral + proportional-on-measurement, in percent
     float prevMeas_  = 0.0f;
     float rate_      = 0.0f;   // smoothed rate of rise, degC per second
     bool  hasPrev_   = false;
 };
 
 void Pid::reset() {
-    integral_ = 0.0f;
-    rate_     = 0.0f;
-    hasPrev_  = false;
+    sum_     = 0.0f;
+    rate_    = 0.0f;
+    hasPrev_ = false;
 }
 
 float Pid::update(float setpoint, float measured, float dtSec) {
-    const float error = setpoint - measured;
-
-    float d = 0.0f;
     if (hasPrev_ && dtSec > 0.0f) {
-        // Derivative on measurement, low-pass filtered, negated: brakes the
-        // approach before the target so stored heat does not overshoot.
-        const float raw = (measured - prevMeas_) / dtSec;
-        rate_ += (raw - rate_) * dtSec / (PID_D_FILTER_S + dtSec);
-        d = -kd_ * rate_;
+        const float dMeas = measured - prevMeas_;
+        rate_ += (dMeas / dtSec - rate_) * dtSec / (PID_D_FILTER_S + dtSec);
+        sum_ += ki_ * (setpoint - measured) * dtSec - kp_ * dMeas;
+        if (sum_ > outMax_) sum_ = outMax_;
+        if (sum_ < outMin_) sum_ = outMin_;
     }
     prevMeas_ = measured;
     hasPrev_  = true;
 
-    const float p = kp_ * error;
-
-    // Trial output with the integral as it stands.
-    float out = p + (ki_ * integral_) + d;
-
-    // Only integrate if doing so would not push further into saturation.
-    if (dtSec > 0.0f) {
-        const bool pinnedHigh = (out >= outMax_) && (error > 0.0f);
-        const bool pinnedLow  = (out <= outMin_) && (error < 0.0f);
-        if (!pinnedHigh && !pinnedLow) {
-            integral_ += error * dtSec;
-            out = p + (ki_ * integral_) + d;
-        }
-    }
-
+    float out = sum_ - kd_ * rate_;
     if (out > outMax_) out = outMax_;
     if (out < outMin_) out = outMin_;
     return out;

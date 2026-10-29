@@ -128,7 +128,9 @@ static void test_preheat_heats_then_hands_over_to_running() {
     ButtonEvents hold; hold.selHold = true;
     tickT(30.0f, 250, hold);
 
-    tickT(32.0f, 250);
+    // Proportional-on-measurement brakes on a sudden rise, so give the
+    // integral a couple of seconds at a steady cold reading.
+    for (int i = 0; i < 8; ++i) tickT(32.0f, 250);
     TEST_ASSERT_EQUAL(static_cast<int>(State::Preheat), static_cast<int>(c.state()));
     TEST_ASSERT_TRUE(c.dutyPct() > 0.0f);            // heater demanded while cold
     TEST_ASSERT_EQUAL_UINT32(DURATION_DEFAULT_MIN * 60UL * 1000UL, c.remainingMs());
