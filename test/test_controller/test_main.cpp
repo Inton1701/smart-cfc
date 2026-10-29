@@ -283,6 +283,33 @@ static void test_duty_is_capped_and_never_negative() {
     TEST_ASSERT_EQUAL_FLOAT(0.0f, c.dutyPct());
 }
 
+// Real chamber: cutting power at 85 C let the reading coast to 100 C, because
+// the probe at the cup lags the 300 W pad. Model that lag and check the
+// controller now eases off early enough.
+static float simulatePeak(float target) {
+    c.setSettings(target, 20);
+    ButtonEvents hold; hold.selHold = true;
+    float pad = 30.0f, probe = 30.0f, peak = 0.0f;
+    tickT(probe, 250, hold);
+    for (int i = 0; i < 4 * 900; ++i) {                  // 15 min in 250 ms steps
+        const float watts = 300.0f * c.dutyPct() / 100.0f;
+        pad   += (watts - 1.2f * (pad - 30.0f)) / 300.0f * 0.25f;
+        probe += (pad - probe) / 20.0f * 0.25f;          // 20 s probe lag
+        const float reading = floorf(probe * 4.0f) / 4.0f;   // MAX6675 0.25 C steps
+        tickT(reading, 250);
+        if (reading > peak) peak = reading;
+    }
+    return peak;
+}
+
+static void test_lagging_plate_does_not_coast_past_target() {
+    const float peak = simulatePeak(85.0f);
+    char msg[48]; snprintf(msg, sizeof(msg), "peak %.2f C for 85 C target", peak);
+    TEST_MESSAGE(msg);
+    TEST_ASSERT_TRUE(peak <= 85.0f + 3.0f);
+    TEST_ASSERT_TRUE(peak >= 85.0f - 1.0f);   // still reaches temperature
+}
+
 int main(int, char**) {
     UNITY_BEGIN();
     RUN_TEST(test_starts_idle_with_defaults);
@@ -303,5 +330,6 @@ int main(int, char**) {
     RUN_TEST(test_sensor_fault_clears_only_once_readings_return);
     RUN_TEST(test_preheat_timeout_faults_when_it_never_gets_hot);
     RUN_TEST(test_duty_is_capped_and_never_negative);
+    RUN_TEST(test_lagging_plate_does_not_coast_past_target);
     return UNITY_END();
 }

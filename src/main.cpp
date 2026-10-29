@@ -84,7 +84,7 @@ constexpr char OTA_HOST[] = "cfc-chamber";
 constexpr uint32_t OTA_TRIAL_MS = 60000;      // new firmware must run cleanly this long
 // Updates from the internet: the newest GitHub Release of this repository.
 // Bump FW_VERSION and tag the release to match (1.0.1 -> tag v1.0.1).
-constexpr char FW_VERSION[] = "1.0.4";
+constexpr char FW_VERSION[] = "1.0.5";
 constexpr char GH_REPO[]    = "Inton1701/smart-cfc";
 
 #if CFC_SIM
@@ -130,12 +130,16 @@ constexpr uint32_t PREHEAT_TIMEOUT_MS = 15UL * 60UL * 1000UL;
 // spec behaviour (countdown begins the instant Set/Start is pressed).
 constexpr bool TIMER_STARTS_AFTER_PREHEAT = true;
 
-// PI-dominant. D stays small: MAX6675 quantises to 0.25 C, so a large Kd
-// mostly amplifies quantisation steps. Starting estimates for the 300 W pad:
-// retune after the first ramp log.
-constexpr float PID_KP = 12.5f;   // percent per degC
-constexpr float PID_KI = 0.04f;   // percent per degC per second
-constexpr float PID_KD = 4.0f;    // percent-seconds per degC
+// The pad keeps heating after it is switched off: the probe at the cup lags
+// the pad, so cutting power at the target overshot 85 C to 100 C. The D term
+// looks ahead PID_KD / PID_KP seconds (here 15 s) on the rate of rise and
+// eases off early. The rate is smoothed over PID_D_FILTER_S because the
+// MAX6675 reads in 0.25 C steps. Still overshooting: raise PID_KD.
+// Stalling below target: lower it.
+constexpr float PID_KP = 6.0f;    // percent per degC
+constexpr float PID_KI = 0.02f;   // percent per degC per second
+constexpr float PID_KD = 90.0f;   // percent-seconds per degC
+constexpr float PID_D_FILTER_S = 4.0f;  // time constant of the rate smoothing
 constexpr float DUTY_MAX_PCT = 100.0f;
 
 // Time-proportional output: PID commands a duty percent, this window converts
@@ -208,11 +212,13 @@ private:
     float kp_, ki_, kd_, outMin_, outMax_;
     float integral_  = 0.0f;
     float prevMeas_  = 0.0f;
+    float rate_      = 0.0f;   // smoothed rate of rise, degC per second
     bool  hasPrev_   = false;
 };
 
 void Pid::reset() {
     integral_ = 0.0f;
+    rate_     = 0.0f;
     hasPrev_  = false;
 }
 
@@ -221,8 +227,11 @@ float Pid::update(float setpoint, float measured, float dtSec) {
 
     float d = 0.0f;
     if (hasPrev_ && dtSec > 0.0f) {
-        // Derivative on measurement, negated: brakes the approach.
-        d = -kd_ * ((measured - prevMeas_) / dtSec);
+        // Derivative on measurement, low-pass filtered, negated: brakes the
+        // approach before the target so stored heat does not overshoot.
+        const float raw = (measured - prevMeas_) / dtSec;
+        rate_ += (raw - rate_) * dtSec / (PID_D_FILTER_S + dtSec);
+        d = -kd_ * rate_;
     }
     prevMeas_ = measured;
     hasPrev_  = true;
