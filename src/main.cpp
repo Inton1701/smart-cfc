@@ -84,7 +84,7 @@ constexpr char OTA_HOST[] = "cfc-chamber";
 constexpr uint32_t OTA_TRIAL_MS = 60000;      // new firmware must run cleanly this long
 // Updates from the internet: the newest GitHub Release of this repository.
 // Bump FW_VERSION and tag the release to match (1.0.1 -> tag v1.0.1).
-constexpr char FW_VERSION[] = "1.0.8";
+constexpr char FW_VERSION[] = "1.0.9";
 constexpr char GH_REPO[]    = "Inton1701/smart-cfc";
 
 #if CFC_SIM
@@ -133,17 +133,18 @@ constexpr bool TIMER_STARTS_AFTER_PREHEAT = true;
 // Tuned on a model fitted to a real 85 C run (pad ~40 J/K, probe lag ~66 s,
 // loss ~0.6 W/K): at full power the pad heats ~7 C/s and runs far ahead of
 // the probe, so the reading coasted 61 C -> 107 C with the heater already off.
-// Proportional-on-measurement PID (see class Pid), tuned on a model fitted to
-// two real runs (pad ~72 J/K, probe lag ~34 s, loss ~0.42 W/K). Simulated over
-// pad 50-100 J/K, lag 25-50 s, loss 0.35-0.6 W/K, targets 85/130/150 C:
-// <= 0.5 C overshoot, holds +/-1 C within 265 s, pad itself <= 159 C.
+// Classic PID either overshot (strong integral) or stalled 3.5 C short (weak
+// integral, real 85 C run). Fix: proportional-on-measurement (see class Pid),
+// power capped at 40 % (120 W, still enough for 180 C). Simulated over pad
+// 30-60 J/K, probe lag 50-90 s, loss 0.44-0.6 W/K, targets 85 and 150 C:
+// 0 C overshoot, within +/-2 C by 430 s, pad <= 158 C.
 // Overshoots: raise PID_KP. Settles too slowly: raise PID_KI.
 // Moving the probe tight against the pad shortens the lag and helps most.
-constexpr float PID_KP = 6.0f;    // percent per degC of rise (brake)
-constexpr float PID_KI = 0.10f;   // percent per degC per second
-constexpr float PID_KD = 60.0f;   // percent-seconds per degC
+constexpr float PID_KP = 2.0f;    // percent per degC of rise (brake)
+constexpr float PID_KI = 0.02f;   // percent per degC per second
+constexpr float PID_KD = 40.0f;   // percent-seconds per degC
 constexpr float PID_D_FILTER_S = 4.0f;  // time constant of the rate smoothing
-constexpr float DUTY_MAX_PCT = 100.0f;
+constexpr float DUTY_MAX_PCT = 40.0f;
 
 // Time-proportional output: PID commands a duty percent, this window converts
 // it to on/off time. 1 s window suits a thermal load with minutes of lag.
