@@ -84,7 +84,7 @@ constexpr char OTA_HOST[] = "cfc-chamber";
 constexpr uint32_t OTA_TRIAL_MS = 60000;      // new firmware must run cleanly this long
 // Updates from the internet: the newest GitHub Release of this repository.
 // Bump FW_VERSION and tag the release to match (1.0.1 -> tag v1.0.1).
-constexpr char FW_VERSION[] = "1.0.10";
+constexpr char FW_VERSION[] = "1.0.11";
 constexpr char GH_REPO[]    = "Inton1701/smart-cfc";
 
 #if CFC_SIM
@@ -160,7 +160,7 @@ constexpr uint32_t BTN_DEBOUNCE_MS     = 30;
 constexpr uint32_t BTN_LONGPRESS_MS    = 1000; // hold SEL this long to begin
 constexpr uint32_t BTN_REPEAT_DELAY_MS = 500;
 constexpr uint32_t BTN_REPEAT_RATE_MS  = 120;
-constexpr float    HOT_WARN_C          = 50.0f; // plate this hot or hotter: show a do-not-touch warning
+constexpr float    HOT_WARN_C          = 40.0f; // plate this hot or hotter: show a do-not-touch warning
 constexpr uint32_t SAVED_FLASH_MS      = 1500; // "SAVED" on the setup screen after a SEL tap
 constexpr uint32_t WDT_TIMEOUT_S       = 5;
 
@@ -1253,7 +1253,14 @@ void Ui::drawSetup(const Controller& c, uint32_t f, bool saved) {
             text(cx - textWidth(v, 2) / 2, 34, v, 2, col);
         }
     }
-    text(0, 56, "SEL:save hold:start");
+    // Plate hot: every other second the hint becomes a highlighted warning bar.
+    if (c.tempValid() && c.tempC() >= HOT_WARN_C && (f / 4) % 2 == 0) {
+        rfill(0, 55, 128, 9);
+        snprintf(buf, sizeof(buf), "PLATE HOT %d^C", static_cast<int>(c.tempC()));
+        centerText(56, buf, OFF);
+    } else {
+        text(0, 56, "SEL:save hold:start");
+    }
 }
 
 void Ui::drawHeating(const Controller& c, uint32_t f, bool heaterOn) {
@@ -1297,13 +1304,15 @@ void Ui::drawComplete(const Controller& c, uint32_t f) {
     bitmap(4, 14, CHECK, 9, ON, 3);
     text(48, 8, "DONE", 2);
     if (c.tempValid() && c.tempC() >= HOT_WARN_C && f % 4 != 3) {   // blinking warning
-        text(48, 28, "PLATE HOT!");
-        snprintf(buf, sizeof(buf), "%d^C, no touch", static_cast<int>(c.tempC()));
+        // x 44, not 48: "120°C no touch" needs the extra room to fit 128 px.
+        text(44, 28, "PLATE HOT!");
+        snprintf(buf, sizeof(buf), "%d^C no touch", static_cast<int>(c.tempC()));
+        text(44, 38, buf);
     } else {
         text(48, 28, "heater off");
         snprintf(buf, sizeof(buf), "%u min cycle", static_cast<unsigned>(c.durationMin()));
+        text(48, 38, buf);
     }
-    text(48, 38, buf);
     const int sx = (f % 2) ? 42 : 2, sy = (f % 2) ? 10 : 44;   // sparkle hops
     d_.drawPixel(sx, sy, ON); d_.drawPixel(sx - 1, sy + 1, ON);
     d_.drawPixel(sx + 1, sy + 1, ON); d_.drawPixel(sx, sy + 2, ON);
