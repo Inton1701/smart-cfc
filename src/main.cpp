@@ -84,7 +84,7 @@ constexpr char OTA_HOST[] = "cfc-chamber";
 constexpr uint32_t OTA_TRIAL_MS = 60000;      // new firmware must run cleanly this long
 // Updates from the internet: the newest GitHub Release of this repository.
 // Bump FW_VERSION and tag the release to match (1.0.1 -> tag v1.0.1).
-constexpr char FW_VERSION[] = "1.0.11";
+constexpr char FW_VERSION[] = "1.0.12";
 constexpr char GH_REPO[]    = "Inton1701/smart-cfc";
 
 #if CFC_SIM
@@ -969,6 +969,12 @@ static Max6675Source tempSource;
 // Display
 // ============================================================
 
+// Set by loop() when the chamber joins a Wi-Fi network; the setup screen shows
+// it in place of the hint for IP_NOTE_MS so the user can find the web page.
+constexpr uint32_t IP_NOTE_MS = 10000;
+static char     ipNote[22]  = "";
+static uint32_t ipNoteAtMs  = 0;
+
 // 128x64 OLED renderer. One screen per controller state, with small animated
 // icons; the layout matches the "CFC OLED Screens" mock pixel for pixel.
 // In text, '^' draws a degree sign (the 5x7 font has none in plain ASCII).
@@ -1258,6 +1264,8 @@ void Ui::drawSetup(const Controller& c, uint32_t f, bool saved) {
         rfill(0, 55, 128, 9);
         snprintf(buf, sizeof(buf), "PLATE HOT %d^C", static_cast<int>(c.tempC()));
         centerText(56, buf, OFF);
+    } else if (ipNote[0] && millis() - ipNoteAtMs < IP_NOTE_MS) {
+        text(0, 56, ipNote);   // just joined a network: show where to find the page
     } else {
         text(0, 56, "SEL:save hold:start");
     }
@@ -1444,6 +1452,7 @@ h1{font-size:18px;margin:0}h2{font-size:15px;margin:0}
 .chip.hot{border-color:var(--hot);color:var(--hot)}.chip.ok{border-color:var(--ok);color:var(--ok)}
 .temp{font-size:44px;font-weight:600;font-variant-numeric:tabular-nums}
 .mute{color:var(--mute);font-size:13px}
+.warn{color:var(--hot);font-size:13px}
 .bar{height:10px;border-radius:5px;background:var(--line);overflow:hidden}
 .bar i{display:block;height:100%;width:0;background:var(--accent);transition:width .4s}
 label{display:grid;gap:4px;font-size:13px;color:var(--mute)}
@@ -1461,6 +1470,7 @@ a{color:var(--accent)}
   <div class="bar"><i id="bar"></i></div>
   <div class="row mute"><span id="time"></span><span id="io"></span></div>
   <div class="mute" id="fault"></div>
+  <div class="warn" id="hot" hidden></div>
   <button class="stop" id="stop" hidden>Stop cycle</button>
 </div>
 <form class="card" id="set">
@@ -1479,6 +1489,7 @@ a{color:var(--accent)}
   <form id="wifi" class="grid2">
     <label for="ws">Wi-Fi name<input id="ws" type="text" maxlength="32" required style="font:inherit;padding:8px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--ink)"></label>
     <label for="wp">Password<input id="wp" type="password" maxlength="63" style="font:inherit;padding:8px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--ink)"></label>
+    <label for="sp" style="display:flex;gap:6px;align-items:center"><input id="sp" type="checkbox"> Show password</label>
     <button type="submit">Connect</button>
   </form>
 </div>
@@ -1514,12 +1525,12 @@ async function tick(){
     const idle=s.state==='Idle';
     ['t','m','f','save'].forEach(k=>$(k).disabled=!idle);
     $('ver').textContent=s.ver;
-    $('net').textContent=s.sta?('Online via '+s.ssid+' ('+s.ip+')'):'Not online. Enter a Wi-Fi network with internet below.';
+    $('net').textContent=s.sta?('Online via '+s.ssid+'. On that network, open http://'+s.ip):'Not online. Enter a Wi-Fi network with internet below.';
     $('chk').disabled=!(idle&&s.sta);
     if(s.ghmsg)$('ghmsg').textContent=s.ghmsg;
     if(!idle){$('msg').textContent='Settings can be changed on the setup screen only.'}
     else if(!filled){$('t').value=s.target;$('m').value=s.minutes;$('f').checked=s.fan_enabled;filled=true;$('msg').textContent='Start a cycle by holding SEL on the chamber.'}
-  }catch(e){$('state').textContent='No connection'}
+  }catch(e){$('state').textContent='Offline';$('net').textContent='Lost contact with the chamber. Reconnect to the CFC-Chamber Wi-Fi, or open the address shown on the chamber screen.'}
 }
 $('set').addEventListener('submit',async e=>{
   e.preventDefault();
@@ -1528,6 +1539,7 @@ $('set').addEventListener('submit',async e=>{
   $('msg').textContent=await r.text();
 });
 $('stop').addEventListener('click',async()=>{await fetch('/stop',{method:'POST'});tick()});
+$('sp').addEventListener('change',()=>{$('wp').type=$('sp').checked?'text':'password'});
 $('wifi').addEventListener('submit',async e=>{
   e.preventDefault();
   const r=await fetch('/wifi',{method:'POST',body:new URLSearchParams({ssid:$('ws').value,pass:$('wp').value})});
@@ -1639,7 +1651,9 @@ static void handleWifi() {
     prefs.putString("wssid", ssid);
     prefs.putString("wpass", pass);
     WiFi.begin(ssid.c_str(), pass.c_str());
-    web.send(200, "text/plain", "Saved. Connecting... the status line shows when it is online.");
+    web.send(200, "text/plain", "Connecting... This page may drop for a moment while the chamber "
+                                "switches. If it does, reconnect to CFC-Chamber, or open the address "
+                                "shown on the chamber screen.");
 }
 
 static void handleGhCheck() {
@@ -1847,6 +1861,14 @@ void loop() {
     const uint32_t now = millis();
 
     ArduinoOTA.handle();
+    // Announce a new Wi-Fi connection on the OLED with the address to browse.
+    static bool staWasUp = false;
+    const bool staUp = WiFi.status() == WL_CONNECTED;
+    if (staUp && !staWasUp) {
+        snprintf(ipNote, sizeof(ipNote), "IP %s", WiFi.localIP().toString().c_str());
+        ipNoteAtMs = now;
+    }
+    staWasUp = staUp;
     web.handleClient();
     if (otaTrial && now >= OTA_TRIAL_MS) {
         esp_ota_mark_app_valid_cancel_rollback();
