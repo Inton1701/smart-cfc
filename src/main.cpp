@@ -1,6 +1,6 @@
 // Smart CFC -- Cyanoacrylate Fuming Chamber controller
 // ESP32 + MAX6675 K-type + 220 V 300 W heating pad via SSR-40DA + 2.42" OLED
-// + 5-key membrane keypad + buzzer + circulation fan on a relay module.
+// + 5-key membrane keypad + buzzer.
 //
 // Single-file firmware. The top half (config, PID, controller) is pure logic
 // with no Arduino in it; the desktop unit tests include this file with
@@ -72,9 +72,6 @@ constexpr int PIN_KEY_SEL   = 13;
 constexpr int  PIN_BUZZER = 4;
 constexpr bool BUZZER_ACTIVE_HIGH = true;
 
-// Relay module switching the 40 mm circulation fan.
-constexpr int PIN_FAN_RELAY = 23;
-
 // ---------- Web page and over-the-air updates ----------
 // The chamber runs its own Wi-Fi hotspot; the page is at http://192.168.4.1.
 // AP_PASS is the hotspot's Wi-Fi password. Firmware updates need no login.
@@ -84,27 +81,22 @@ constexpr char OTA_HOST[] = "cfc-chamber";
 constexpr uint32_t OTA_TRIAL_MS = 60000;      // new firmware must run cleanly this long
 // Updates from the internet: the newest GitHub Release of this repository.
 // Bump FW_VERSION and tag the release to match (1.0.1 -> tag v1.0.1).
-constexpr char FW_VERSION[] = "1.0.12";
+constexpr char FW_VERSION[] = "1.0.13";
 constexpr char GH_REPO[]    = "Inton1701/smart-cfc";
 
 #if CFC_SIM
-// Wokwi parts: passive piezo, relay module that triggers on HIGH.
-constexpr uint16_t BUZZER_TONE_HZ        = 2700;
-constexpr bool     FAN_RELAY_ACTIVE_HIGH = true;
+constexpr uint16_t BUZZER_TONE_HZ = 2700;   // Wokwi part: passive piezo
 #else
 // 0 = active buzzer (own oscillator, plain on/off). A passive piezo needs a
 // frequency here instead.
-constexpr uint16_t BUZZER_TONE_HZ        = 0;
-// Blue 1-channel 5 V boards usually trigger on LOW. Fan running when it should
-// be idle means yours triggers on HIGH: flip this.
-constexpr bool     FAN_RELAY_ACTIVE_HIGH = false;
+constexpr uint16_t BUZZER_TONE_HZ = 0;
 #endif
 
 constexpr int PIN_SIM_POT = 34;   // sim build only: fault-injection knob (ADC1)
 
 // ---------- Process limits ----------
-// The probe sits at the glue cup on the hot plate. Plate sweet spot for
-// cyanoacrylate fuming is about 120-150 C; above ~220 C the glue breaks down
+// The probe sits at the cyanoacrylate cup on the hot plate. Plate sweet spot for
+// cyanoacrylate fuming is about 120-150 C; above ~220 C it breaks down
 // and releases hydrogen cyanide, which the safety trip below keeps far off.
 constexpr float TARGET_MIN_C     = 30.0f;
 constexpr float TARGET_MAX_C     = 180.0f;
@@ -125,11 +117,11 @@ constexpr uint8_t FAULT_STRIKES = 3;     // consecutive bad reads before fault l
 // an unplugged heater, or a probe that fell off the tray.
 constexpr uint32_t PREHEAT_TIMEOUT_MS = 15UL * 60UL * 1000UL;
 
-// ---------- Control ----------
-// Countdown starts after preheat reaches target. Set false for the literal
-// spec behaviour (countdown begins the instant Set/Start is pressed).
-constexpr bool TIMER_STARTS_AFTER_PREHEAT = true;
+// At temperature, waiting for the operator to add the cyanoacrylate: nobody
+// presses a key this long -> heater off, back to setup.
+constexpr uint32_t READY_TIMEOUT_MS = 10UL * 60UL * 1000UL;
 
+// ---------- Control ----------
 // Tuned on a model fitted to a real 85 C run (pad ~40 J/K, probe lag ~66 s,
 // loss ~0.6 W/K): at full power the pad heats ~7 C/s and runs far ahead of
 // the probe, so the reading coasted 61 C -> 107 C with the heater already off.
@@ -169,6 +161,8 @@ constexpr uint32_t BEEP_KEY_MS  = 40;    // every key press
 constexpr uint32_t BEEP_BOOT_MS = 120;   // power-on: two of these
 constexpr uint32_t BEEP_DONE_MS = 1000;  // cycle complete: long beep on ...
 constexpr uint32_t BEEP_DONE_PERIOD_MS = 2000;  // ... then off, repeating until a key is pressed
+constexpr uint32_t BEEP_READY_MS = 150;  // step 4, at temperature: two short beeps ...
+constexpr uint32_t BEEP_READY_PERIOD_MS = 3000; // ... repeating until a key is pressed
 
 // ============================================================
 // Temperature source interface
@@ -249,16 +243,21 @@ float Pid::update(float setpoint, float measured, float dtSec) {
 // Controller
 // ============================================================
 
+// A cycle walks the operator through four steps, so the cyanoacrylate goes in
+// only once the plate is at temperature.
 enum class State : uint8_t {
     Idle,       // setup screen, heater off
-    Preheat,    // heating to target, dwell countdown not started
+    StepWater,  // step 1: bowl of hot water into the chamber, heater off
+    StepCup,    // step 2: empty cup on the plate, heater off
+    Preheat,    // step 3: heating to target, no cyanoacrylate yet
+    Ready,      // step 4: at target and holding, waiting for the cyanoacrylate
     Running,    // at temp, dwell counting down
     Complete,   // cycle finished normally
     Fault,      // sensor problem or preheat timeout, latched
     SafetyTrip  // over temperature, latched
 };
 
-enum class Field : uint8_t { Target, Duration, Fan };
+enum class Field : uint8_t { Target, Duration };
 
 enum class FaultCode : uint8_t { None, SensorOpen, SensorInvalid, PreheatTimeout };
 
@@ -270,7 +269,8 @@ struct ButtonEvents {
     bool nextTap  = false;  // NEXT: switch between Target and Time
     bool prevTap  = false;  // BEFORE: switch back to the previous field
     bool selTap   = false;  // SEL short press: save settings (setup screen), stop a cycle, or clear a latched fault
-    bool selHold  = false;  // SEL held past BTN_LONGPRESS_MS: start cycle (fires once)
+    bool selHold  = false;  // SEL held past BTN_LONGPRESS_MS: start, or cancel the steps (fires once)
+    bool anyTap   = false;  // short press of any key, SEL included: next step
 };
 
 // Pure logic: no Arduino, no I/O. Compiles and runs on the desktop under
@@ -282,7 +282,7 @@ public:
     void begin(uint32_t nowMs);
     // Restore saved settings. A value outside its limits is ignored, so corrupt
     // storage can never put the target above TARGET_MAX_C.
-    void setSettings(float targetC, uint16_t durationMin, bool fanOn = true);
+    void setSettings(float targetC, uint16_t durationMin);
     // Call every loop iteration so buttons and the countdown stay responsive.
     // freshSample must be true only when `reading` is a new MAX6675 conversion:
     // the PID steps on samples, not on loop iterations, or the derivative term
@@ -295,7 +295,6 @@ public:
     Field     field()      const { return field_; }
     float     targetC()    const { return targetC_; }
     uint16_t  durationMin() const { return durationMin_; }
-    bool      fanEnabled()  const { return fanEnabled_; }
 
     float tempC()     const { return tempC_; }
     bool  tempValid() const { return tempValid_; }
@@ -325,7 +324,6 @@ private:
 
     float    targetC_     = TARGET_DEFAULT_C;
     uint16_t durationMin_ = DURATION_DEFAULT_MIN;
-    bool     fanEnabled_  = true;   // optional fan: operator can switch it off
 
     float   tempC_     = 0.0f;
     bool    tempValid_ = false;
@@ -336,6 +334,7 @@ private:
     bool     hasLastMs_        = false;
     uint32_t remainingMs_      = 0;
     uint32_t preheatElapsedMs_ = 0;
+    uint32_t readyElapsedMs_   = 0;
     float    preheatStartC_    = 0.0f;
     uint32_t lastSampleMs_    = 0;
     bool     hasLastSample_   = false;
@@ -352,8 +351,7 @@ void Controller::begin(uint32_t nowMs) {
     enterIdle();
 }
 
-void Controller::setSettings(float targetC, uint16_t durationMin, bool fanOn) {
-    fanEnabled_ = fanOn;
+void Controller::setSettings(float targetC, uint16_t durationMin) {
     // Tested as "inside the range" so that a NaN fails it too.
     if (targetC >= TARGET_MIN_C && targetC <= TARGET_MAX_C) targetC_ = targetC;
     if (durationMin >= DURATION_MIN_MIN && durationMin <= DURATION_MAX_MIN) {
@@ -387,13 +385,11 @@ void Controller::startCycle(uint32_t nowMs) {
     preheatStartC_     = tempC_;
     pid_.reset();
     hasLastSample_ = false;
-    state_ = TIMER_STARTS_AFTER_PREHEAT ? State::Preheat : State::Running;
+    state_ = State::Preheat;
 }
 
 void Controller::adjust(int direction) {
-    if (field_ == Field::Fan) {
-        fanEnabled_ = !fanEnabled_;   // two states: INC and DEC both toggle
-    } else if (field_ == Field::Target) {
+    if (field_ == Field::Target) {
         targetC_ = clampT(targetC_ + direction * TARGET_STEP_C,
                           TARGET_MIN_C, TARGET_MAX_C);
     } else {
@@ -454,11 +450,24 @@ void Controller::update(uint32_t nowMs, const TempReading& reading,
         duty_ = 0.0f;
         if (ev.decStep) adjust(-1);
         if (ev.incStep) adjust(+1);
-        // NEXT / BEFORE step through Target -> Duration -> Fan and wrap.
-        if (ev.nextTap) field_ = static_cast<Field>((static_cast<int>(field_) + 1) % 3);
-        if (ev.prevTap) field_ = static_cast<Field>((static_cast<int>(field_) + 2) % 3);
+        // NEXT / BEFORE switch between Target and Duration.
+        if (ev.nextTap || ev.prevTap) {
+            field_ = field_ == Field::Target ? Field::Duration : Field::Target;
+        }
         // Never start a cycle without a trustworthy reading.
-        if (ev.selHold && tempValid_) startCycle(nowMs);
+        if (ev.selHold && tempValid_) state_ = State::StepWater;
+        break;
+
+    // Steps 1 and 2: heater off. A short press of any key moves on; holding
+    // SEL cancels.
+    case State::StepWater:
+    case State::StepCup:
+        duty_ = 0.0f;
+        if (ev.selHold) { enterIdle(); break; }
+        if (ev.anyTap) {
+            if (state_ == State::StepWater) state_ = State::StepCup;
+            else if (tempValid_)            startCycle(nowMs);
+        }
         break;
 
     // Stopping is deliberately easier than starting: a tap or a hold both do it.
@@ -471,8 +480,19 @@ void Controller::update(uint32_t nowMs, const TempReading& reading,
         }
         if (freshSample) runHeat(dtSec);
         if (tempC_ >= (targetC_ - HYSTERESIS_C)) {
-            state_ = State::Running;
+            state_ = State::Ready;
+            readyElapsedMs_ = 0;
         }
+        break;
+
+    // Step 4: keep holding the target until the cyanoacrylate is in and a key
+    // is pressed. Holding SEL cancels; nobody coming back turns the heater off.
+    case State::Ready:
+        if (ev.selHold) { enterIdle(); break; }
+        if (freshSample) runHeat(dtSec);
+        if (ev.anyTap) { state_ = State::Running; break; }
+        readyElapsedMs_ += dtMs;
+        if (readyElapsedMs_ >= READY_TIMEOUT_MS) enterIdle();
         break;
 
     case State::Running:
@@ -534,6 +554,7 @@ int cycleProgressPct(const Controller& c) {
         const float p = span > 0.0f ? (c.tempC() - c.preheatStartC()) / span : 1.0f;
         return static_cast<int>(100.0f * (p < 0.0f ? 0.0f : (p > 1.0f ? 1.0f : p)));
     }
+    if (c.state() == State::Ready) return 100;   // warm-up done
     if (c.state() == State::Running) {
         const uint32_t totalMs = static_cast<uint32_t>(c.durationMin()) * 60000UL;
         return static_cast<int>(100UL * (totalMs - c.remainingMs()) / totalMs);
@@ -656,6 +677,10 @@ ButtonEvents Panel::poll(uint32_t nowMs) {
     ev.prevTap  = before_.takeTap();
     ev.selTap   = sel_.takeTap();
     ev.selHold  = sel_.takeHold();
+    // On release, so holding INC to auto-repeat can never skip a step. Every
+    // key's tap is taken each poll, so a stale one cannot fire later.
+    const bool incTap = inc_.takeTap(), decTap = dec_.takeTap();
+    ev.anyTap   = incTap || decTap || ev.nextTap || ev.prevTap || ev.selTap;
     return ev;
 }
 
@@ -717,25 +742,6 @@ void Buzzer::bootBeeps() {
         write(false);
         delay(BEEP_BOOT_MS);
     }
-}
-
-// ============================================================
-// Fan
-// ============================================================
-
-static bool fanOn = false;
-
-static void fanSet(bool on) {
-    fanOn = on;
-    digitalWrite(PIN_FAN_RELAY, (on == FAN_RELAY_ACTIVE_HIGH) ? HIGH : LOW);
-}
-
-static void fanBegin() {
-    // Level first, then direction, so the relay never sees a stray pulse.
-    fanSet(false);
-    // A LOW-trigger 5 V board reads a 3.3 V "high" as still partly on, so its
-    // off state has to float instead: open drain.
-    pinMode(PIN_FAN_RELAY, FAN_RELAY_ACTIVE_HIGH ? OUTPUT : OUTPUT_OPEN_DRAIN);
 }
 
 // ============================================================
@@ -992,6 +998,9 @@ private:
     static constexpr uint16_t OFF = SSD1306_BLACK;
 
     void drawSetup(const Controller& c, uint32_t f, bool saved);
+    void drawStepWater(uint32_t f);
+    void drawStepCup(uint32_t f);
+    void drawReady(const Controller& c, uint32_t f);
     void drawHeating(const Controller& c, uint32_t f, bool heaterOn);
     void drawComplete(const Controller& c, uint32_t f);
     void drawFault(const Controller& c, uint32_t f);
@@ -1007,13 +1016,18 @@ private:
                 int scale = 1, bool dim = false);
     void thermo(int x, int y, float level, uint16_t color = ON);
     void hourglass(int x, int y, int k, uint16_t color = ON);
-    void fanIcon(int x, int y, int frame, bool enabled, uint16_t color = ON);
     void chevrons(int x, int y, uint32_t f);
     void chip(const char* label);
+    void titleBar(const char* label, bool filled = true);
     void fingerprint(int x, int y);
+    // Icon drawing at scale s: block (i, j, w, h) in icon pixels from (x, y).
+    void cell(int x, int y, int s, int i, int j, int w = 1, int h = 1, uint16_t color = ON);
+    void steamBowl(int x, int y, uint32_t f, int s);
+    void cupOnPlate(int x, int y, int s);
+    void dropIntoCup(int x, int y, uint32_t f);
+    void noDrop(int x, int y, uint16_t color);
 
     Adafruit_SSD1306 d_{128, 64, &Wire, -1};
-    uint16_t fanRows_[4][12] = {};      // 4 rotation frames, built once in begin()
 };
 
 namespace {
@@ -1046,6 +1060,7 @@ const char* const WARN[12] = {
     "...##.#.##...", "...#..#..#...", "..##..#..##..", "..#.......#..", ".##...#...##.",
     ".#.........#.", "#############",
 };
+const char* const DROP[7] = { "..#..", "..#..", ".###.", "#####", "#####", "#####", ".###." };
 }  // namespace
 
 bool Ui::begin() {
@@ -1055,23 +1070,6 @@ bool Ui::begin() {
     Wire.beginTransmission(OLED_ADDR);
     if (Wire.endTransmission() != 0) return false;
     if (!d_.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR)) return false;
-
-    // Fan blades: three curved blades and a rim, rotated 30 degrees per frame.
-    const float third = 2.0f * PI / 3.0f;
-    for (int k = 0; k < 4; ++k) {
-        const float a = k * PI / 6.0f;
-        for (int j = 0; j < 12; ++j) {
-            uint16_t row = 0;
-            for (int i = 0; i < 12; ++i) {
-                const float x = i + 0.5f - 6.0f, y = j + 0.5f - 6.0f;
-                const float d = sqrtf(x * x + y * y);
-                float t = fmodf(atan2f(y, x) - a - d * 0.28f, third);
-                if (t < 0) t += third;
-                if (d < 1.6f || (d < 6.0f && t < 0.95f) || (d > 5.6f && d < 6.2f)) row |= 1u << i;
-            }
-            fanRows_[k][j] = row;
-        }
-    }
     d_.clearDisplay();
     d_.display();
     return true;
@@ -1148,17 +1146,39 @@ void Ui::hourglass(int x, int y, int k, uint16_t c) {
     if (k < 3) d_.drawPixel(x + 4, y + 7 + (k % 2), c);   // falling grain
 }
 
-void Ui::fanIcon(int x, int y, int frame, bool enabled, uint16_t c) {
-    for (int j = 0; j < 12; ++j)
-        for (int i = 0; i < 12; ++i)
-            if (fanRows_[frame & 3][j] & (1u << i)) d_.drawPixel(x + i, y + j, c);
-    if (!enabled) {   // slash: background-colored edge so it reads over the blades
-        const uint16_t bg = (c == ON) ? OFF : ON;
-        for (int i = 0; i < 13; ++i) {
-            d_.drawPixel(x - 1 + i, y + 12 - i, bg);
-            d_.drawPixel(x + i, y + 12 - i, c);
-        }
-    }
+void Ui::cell(int x, int y, int s, int i, int j, int w, int h, uint16_t c) {
+    d_.fillRect(x + i * s, y + j * s, w * s, h * s, c);
+}
+
+// Bowl of water with steam rising, 16 x 15.
+void Ui::steamBowl(int x, int y, uint32_t f, int s) {
+    cell(x, y, s, 0, 9, 16, 1);  cell(x, y, s, 0, 9, 1, 3);  cell(x, y, s, 15, 9, 1, 3);
+    cell(x, y, s, 1, 12, 14, 1); cell(x, y, s, 2, 13, 12, 1); cell(x, y, s, 4, 14, 8, 1);
+    for (int i = 2; i < 14; i += 2) cell(x, y, s, i, 11);              // water surface
+    for (int k = 0; k < 3; ++k)                                         // three wavy steam trails
+        for (int j = 0; j < 7; ++j)
+            if ((j + f + k) % 7 < 5) cell(x, y, s, 3 + k * 5 + static_cast<int>(((j + f) >> 1) % 2), 7 - j);
+}
+
+// Cup on the hot plate, 20 x 12.
+void Ui::cupOnPlate(int x, int y, int s) {
+    cell(x, y, s, 4, 2, 12, 1);  cell(x, y, s, 6, 8, 8, 1);            // rim, bottom
+    for (int j = 0; j < 6; ++j) { cell(x, y, s, 4 + (j >> 1), 3 + j); cell(x, y, s, 15 - (j >> 1), 3 + j); }
+    cell(x, y, s, 0, 9, 20, 3);                                         // plate
+}
+
+// A drop of cyanoacrylate falling into the cup.
+void Ui::dropIntoCup(int x, int y, uint32_t f) {
+    cupOnPlate(x, y + 16, 1);
+    if (f % 6 < 5) bitmap(x + 8, y + static_cast<int>(f % 6) * 3, DROP, 7);
+    d_.fillRect(x + 7, y + 22, 6, 1, ON);                               // liquid in the cup
+}
+
+// Drop with a slash through it: "no cyanoacrylate".
+void Ui::noDrop(int x, int y, uint16_t c) {
+    bitmap(x + 3, y, DROP, 7, c);
+    const uint16_t bg = (c == ON) ? OFF : ON;
+    for (int i = 0; i < 11; ++i) { d_.drawPixel(x + i, y + 9 - i, bg); d_.drawPixel(x + 1 + i, y + 9 - i, c); }
 }
 
 void Ui::chevrons(int x, int y, uint32_t f) {
@@ -1173,6 +1193,11 @@ void Ui::chip(const char* label) {
     const int w = textWidth(label) + 6;
     rfill(128 - w, 0, w, 9);
     text(128 - w + 3, 1, label, 1, OFF);
+}
+
+void Ui::titleBar(const char* label, bool filled) {
+    if (filled) { rfill(0, 0, 128, 10); centerText(1, label, OFF); }
+    else        { rrect(0, 0, 128, 10); centerText(1, label); }
 }
 
 void Ui::fingerprint(int x, int y) {
@@ -1233,31 +1258,25 @@ void Ui::drawSetup(const Controller& c, uint32_t f, bool saved) {
     rightText(1, buf);
     d_.drawFastHLine(0, 13, 128, ON);
 
-    // Three tiles, TEMP | TIME | FAN: icon on top, value below.
-    for (int i = 0; i < 3; ++i) {
-        const int x0 = i * 43, cx = x0 + 21;
+    // Two tiles, TEMP | TIME: icon on top, value below.
+    for (int i = 0; i < 2; ++i) {
+        const int x0 = i * 65, cx = x0 + 31;
         const bool sel = static_cast<int>(c.field()) == i;
         const uint16_t col = sel ? OFF : ON;
-        if (sel) rfill(x0, 15, 42, 38); else rrect(x0, 15, 42, 38);
+        if (sel) rfill(x0, 15, 63, 38); else rrect(x0, 15, 63, 38);
+        const char* unit;
         if (i == 0) {
             thermo(cx - 3, 17, thermoLevel(c.targetC()), col);
             snprintf(buf, sizeof(buf), "%d", static_cast<int>(c.targetC()));
-            // Three digits fill the 42 px tile, so the unit is shown only below 100.
-            const bool unit = c.targetC() < 100.0f;
-            const int w = textWidth(buf, 2) + (unit ? 2 + textWidth("^C") : 0);
-            const int x = text(cx - w / 2, 34, buf, 2, col);
-            if (unit) text(x, 41, "^C", 1, col);
-        } else if (i == 1) {
+            unit = "^C";
+        } else {
             hourglass(cx - 4, 17, sel ? static_cast<int>((f / 2) % 4) : 0, col);
             snprintf(buf, sizeof(buf), "%u", static_cast<unsigned>(c.durationMin()));
-            const int w = textWidth(buf, 2) + 2 + textWidth("m");
-            const int x = text(cx - w / 2, 34, buf, 2, col);
-            text(x, 41, "m", 1, col);
-        } else {
-            fanIcon(cx - 6, 17, (sel && c.fanEnabled()) ? static_cast<int>(f % 4) : 0, c.fanEnabled(), col);
-            const char* v = c.fanEnabled() ? "ON" : "OFF";
-            text(cx - textWidth(v, 2) / 2, 34, v, 2, col);
+            unit = "min";
         }
+        const int w = textWidth(buf, 2) + 2 + textWidth(unit);
+        const int x = text(cx - w / 2, 34, buf, 2, col);
+        text(x, 41, unit, 1, col);
     }
     // Plate hot: every other second the hint becomes a highlighted warning bar.
     if (c.tempValid() && c.tempC() >= HOT_WARN_C && (f / 4) % 2 == 0) {
@@ -1269,6 +1288,40 @@ void Ui::drawSetup(const Controller& c, uint32_t f, bool saved) {
     } else {
         text(0, 56, "SEL:save hold:start");
     }
+}
+
+void Ui::drawStepWater(uint32_t f) {
+    titleBar("STEP 1 OF 4");
+    steamBowl(2, 13, f, 2);
+    text(42, 16, "Put a bowl of");
+    text(42, 26, "hot water in");
+    text(42, 36, "the chamber");
+    d_.drawFastHLine(0, 52, 128, ON);
+    centerText(56, "any key: next");
+}
+
+void Ui::drawStepCup(uint32_t f) {
+    titleBar("STEP 2 OF 4");
+    cupOnPlate(1, 14, 2);
+    text(46, 13, "Put empty cup");
+    text(46, 22, "on heating");
+    text(46, 31, "plate.");
+    if (f % 4 != 3) { rfill(0, 40, 128, 10); centerText(41, "NO CYANOACRYLATE YET", OFF); }   // blinks
+    d_.drawFastHLine(0, 52, 128, ON);
+    centerText(56, "any key: start heat");
+}
+
+void Ui::drawReady(const Controller& c, uint32_t f) {
+    char buf[24];
+    snprintf(buf, sizeof(buf), "STEP 4  %d^C READY", static_cast<int>(c.targetC()));
+    titleBar(buf, f % 2 == 0);   // title flashes
+    dropIntoCup(4, 13, f);
+    text(34, 14, "Add the");
+    text(34, 23, "cyanoacrylate");
+    text(34, 32, "to cup, then");
+    text(34, 41, "close chamber");
+    d_.drawFastHLine(0, 52, 128, ON);
+    centerText(56, "any key: start");
 }
 
 void Ui::drawHeating(const Controller& c, uint32_t f, bool heaterOn) {
@@ -1285,10 +1338,15 @@ void Ui::drawHeating(const Controller& c, uint32_t f, bool heaterOn) {
     text(22, 19, buf);
     chip(pre ? "HEAT" : "RUN");
     // Flame flickers while the SSR is conducting, dims between pulses.
-    bitmap(98, 13, FLAME[f % 2], 12, ON, 1, !heaterOn);
-    fanIcon(114, 13, c.fanEnabled() ? static_cast<int>(f % 4) : 0, c.fanEnabled());
+    bitmap(116, 13, FLAME[f % 2], 12, ON, 1, !heaterOn);
 
-    if (pre) {
+    if (pre && (f / 6) % 2 == 1) {
+        // Every 1.5 s during warm-up: a reminder not to add the cyanoacrylate yet.
+        rfill(0, 30, 128, 16);
+        noDrop(3, 33, OFF);
+        text(18, 31, "DON'T ADD", 1, OFF);
+        text(18, 38, "CYANOACRYLATE YET", 1, OFF);
+    } else if (pre) {
         chevrons(0, 31, f);
         mmss(c.preheatElapsedMs(), buf, sizeof(buf));
         x = text(12, 31, buf, 2);
@@ -1361,6 +1419,9 @@ void Ui::render(const Controller& c, bool heaterOn, bool saved) {
     d_.clearDisplay();
     switch (c.state()) {
     case State::Idle:       drawSetup(c, f, saved);                 break;
+    case State::StepWater:  drawStepWater(f);                       break;
+    case State::StepCup:    drawStepCup(f);                         break;
+    case State::Ready:      drawReady(c, f);                        break;
     case State::Preheat:
     case State::Running:    drawHeating(c, f, heaterOn);            break;
     case State::Complete:   drawComplete(c, f);                     break;
@@ -1469,7 +1530,7 @@ a{color:var(--accent)}
   <div class="row"><span id="phase" class="mute">Progress</span><span id="pct" class="mute">0%</span></div>
   <div class="bar"><i id="bar"></i></div>
   <div class="row mute"><span id="time"></span><span id="io"></span></div>
-  <div class="mute" id="fault"></div>
+  <div class="mute" id="note"></div>
   <div class="warn" id="hot" hidden></div>
   <button class="stop" id="stop" hidden>Stop cycle</button>
 </div>
@@ -1479,7 +1540,6 @@ a{color:var(--accent)}
     <label for="t">Target (&deg;C, 30-180)<input id="t" type="number" min="30" max="180" step="1" required></label>
     <label for="m">Time (min, 1-240)<input id="m" type="number" min="1" max="240" step="1" required></label>
   </div>
-  <label for="f" style="display:flex;gap:8px;align-items:center"><input id="f" type="checkbox"> Fan on during the cycle</label>
   <button id="save" type="submit">Save settings</button>
   <div class="mute" id="msg">Start a cycle by holding SEL on the chamber.</div>
 </form>
@@ -1506,35 +1566,39 @@ a{color:var(--accent)}
 const $=id=>document.getElementById(id);
 const mmss=s=>String(Math.floor(s/60)).padStart(2,'0')+':'+String(s%60).padStart(2,'0');
 let filled=false;
+const STEP={'Step 1':'Step 1 of 4: put a bowl of hot water in the chamber, then press any key.',
+ 'Step 2':'Step 2 of 4: put the empty cup on the heating plate. No cyanoacrylate yet.',
+ 'Preheat':'Step 3 of 4: warming up. Do not add cyanoacrylate yet.',
+ 'Ready':'Step 4 of 4: add the cyanoacrylate to the cup, close the chamber, press any key.'};
 async function tick(){
   try{
     const s=await (await fetch('/status')).json();
+    const busy=!['Idle','Complete','Fault','Overtemp'].includes(s.state);
     $('state').textContent=s.state;
-    $('state').className='chip'+(s.state==='Fault'||s.state==='Overtemp'?' hot':s.state==='Running'||s.state==='Preheat'?' ok':'');
+    $('state').className='chip'+(s.state==='Fault'||s.state==='Overtemp'?' hot':busy?' ok':'');
     $('temp').innerHTML=s.valid?s.temp.toFixed(1)+'&deg;C':'--.-&deg;C';
     $('target').innerHTML='set '+s.target+'&deg;C';
-    $('phase').textContent=s.state==='Preheat'?'Warming up':'Fuming progress';
+    $('phase').textContent=s.state==='Preheat'||s.state==='Ready'?'Warming up':'Fuming progress';
     $('pct').textContent=s.progress+'%';$('bar').style.width=s.progress+'%';
-    $('time').textContent=s.state==='Running'?mmss(s.remaining)+' left':s.state==='Preheat'?'timer starts at temperature':'';
-    $('io').textContent='heater '+(s.heater?'on':'off')+' · fan '+(s.fan?'on':'off');
-    $('fault').textContent=s.fault?('Fault: '+s.fault):'';
+    $('time').textContent=s.state==='Running'?mmss(s.remaining)+' left':'';
+    $('io').textContent='heater '+(s.heater?'on':'off');
+    $('note').textContent=s.fault?('Fault: '+s.fault):(STEP[s.state]||'');
     $('hot').hidden=!s.hot;if(s.hot)$('hot').innerHTML='<b>Heating plate is still hot ('+s.temp.toFixed(0)+'&deg;C). Do not touch.</b>';
     $('fw').textContent=s.fw+(s.trial?' (on trial)':'');
-    const busy=s.state==='Preheat'||s.state==='Running';
     $('stop').hidden=!busy;
     const idle=s.state==='Idle';
-    ['t','m','f','save'].forEach(k=>$(k).disabled=!idle);
+    ['t','m','save'].forEach(k=>$(k).disabled=!idle);
     $('ver').textContent=s.ver;
     $('net').textContent=s.sta?('Online via '+s.ssid+'. On that network, open http://'+s.ip):'Not online. Enter a Wi-Fi network with internet below.';
     $('chk').disabled=!(idle&&s.sta);
     if(s.ghmsg)$('ghmsg').textContent=s.ghmsg;
     if(!idle){$('msg').textContent='Settings can be changed on the setup screen only.'}
-    else if(!filled){$('t').value=s.target;$('m').value=s.minutes;$('f').checked=s.fan_enabled;filled=true;$('msg').textContent='Start a cycle by holding SEL on the chamber.'}
+    else if(!filled){$('t').value=s.target;$('m').value=s.minutes;filled=true;$('msg').textContent='Start a cycle by holding SEL on the chamber.'}
   }catch(e){$('state').textContent='Offline';$('net').textContent='Lost contact with the chamber. Reconnect to the CFC-Chamber Wi-Fi, or open the address shown on the chamber screen.'}
 }
 $('set').addEventListener('submit',async e=>{
   e.preventDefault();
-  const b=new URLSearchParams({target:$('t').value,minutes:$('m').value,fan:$('f').checked?'1':'0'});
+  const b=new URLSearchParams({target:$('t').value,minutes:$('m').value});
   const r=await fetch('/settings',{method:'POST',body:b});
   $('msg').textContent=await r.text();
 });
@@ -1572,7 +1636,10 @@ button{font:inherit;padding:10px 16px}</style></head><body>
 static const char* stateName(State s) {
     switch (s) {
     case State::Idle:       return "Idle";
+    case State::StepWater:  return "Step 1";
+    case State::StepCup:    return "Step 2";
     case State::Preheat:    return "Preheat";
+    case State::Ready:      return "Ready";
     case State::Running:    return "Running";
     case State::Complete:   return "Complete";
     case State::Fault:      return "Fault";
@@ -1587,12 +1654,11 @@ static void handleStatus() {
     const State st = ctrl.state();
     snprintf(buf, sizeof(buf),
              "{\"state\":\"%s\",\"temp\":%.2f,\"valid\":%s,\"target\":%d,\"minutes\":%u,"
-             "\"fan_enabled\":%s,\"fan\":%s,\"heater\":%s,\"remaining\":%lu,\"progress\":%d,"
+             "\"heater\":%s,\"remaining\":%lu,\"progress\":%d,"
              "\"fault\":\"%s\",\"fw\":\"%s\",\"trial\":%s,\"heap\":%u,\"minheap\":%u,"
              "\"ver\":\"%s\",\"sta\":%s,\"ssid\":\"%s\",\"ip\":\"%s\",\"ghmsg\":\"%s\",\"hot\":%s}",
              stateName(st), ctrl.tempC(), ctrl.tempValid() ? "true" : "false",
              static_cast<int>(ctrl.targetC()), static_cast<unsigned>(ctrl.durationMin()),
-             ctrl.fanEnabled() ? "true" : "false", fanOn ? "true" : "false",
              heater.isOn() ? "true" : "false",
              static_cast<unsigned long>(ctrl.remainingMs() / 1000UL),
              cycleProgressPct(ctrl),
@@ -1616,10 +1682,9 @@ static void handleSettings() {
         web.send(400, "text/plain", "Target must be 30-180 C and time 1-240 min.");
         return;
     }
-    ctrl.setSettings(t, static_cast<uint16_t>(m), web.arg("fan") == "1");
+    ctrl.setSettings(t, static_cast<uint16_t>(m));
     prefs.putFloat("target", ctrl.targetC());
     prefs.putUShort("mins", ctrl.durationMin());
-    prefs.putBool("fan", ctrl.fanEnabled());
     savedFlash = true;
     savedAtMs  = millis();
     web.send(200, "text/plain", "Saved. Hold SEL on the chamber to start.");
@@ -1716,7 +1781,6 @@ static void handleGhInstall() {
 static void runGhInstall() {
     otaActive = true;
     heater.forceOff();
-    fanSet(false);
     esp_task_wdt_delete(nullptr);
     WiFiClientSecure tls;
     tls.setInsecure();
@@ -1801,7 +1865,7 @@ static void startNetwork() {
 
     // Wireless upload from PlatformIO (env:esp32dev_ota).
     ArduinoOTA.setHostname(OTA_HOST);
-    ArduinoOTA.onStart([] { otaActive = true; heater.forceOff(); fanSet(false); });
+    ArduinoOTA.onStart([] { otaActive = true; heater.forceOff(); });
     ArduinoOTA.onProgress([](unsigned int done, unsigned int total) {
         esp_task_wdt_reset();
         static int lastPct = -1;
@@ -1818,7 +1882,6 @@ void setup() {
     // the display, the sensor, or the watchdog get a chance to throw.
     heater.begin();
     heater.forceOff();
-    fanBegin();
     buzzer.begin();
 
     Serial.begin(115200);
@@ -1829,8 +1892,7 @@ void setup() {
     // Power-on settings are whatever a SEL tap last saved.
     prefs.begin("cfc", false);
     ctrl.setSettings(prefs.getFloat("target", TARGET_DEFAULT_C),
-                     prefs.getUShort("mins", DURATION_DEFAULT_MIN),
-                     prefs.getBool("fan", true));
+                     prefs.getUShort("mins", DURATION_DEFAULT_MIN));
     Serial.printf("target %.0fC  time %umin  trip %.0fC\n",
                   ctrl.targetC(), static_cast<unsigned>(ctrl.durationMin()),
                   SAFETY_MAX_C);
@@ -1881,10 +1943,15 @@ void loop() {
         ghInstallRequest = false;
         if (ctrl.state() == State::Idle) runGhInstall();
     }
-    // STOP on the web page acts like a SEL tap, but only on a running cycle.
+    // STOP on the web page acts like holding SEL, which cancels every step, but
+    // only during a cycle (on the setup screen a hold would start one).
     if (webStopRequest) {
         webStopRequest = false;
-        if (ctrl.state() == State::Preheat || ctrl.state() == State::Running) ev.selTap = true;
+        const State s = ctrl.state();
+        if (s != State::Idle && s != State::Complete && s != State::Fault && s != State::SafetyTrip) {
+            ev = ButtonEvents{};
+            ev.selHold = true;
+        }
     }
     if (panel.takeClick()) buzzer.beep(now, BEEP_KEY_MS);
 
@@ -1893,7 +1960,6 @@ void loop() {
     if (ev.selTap && ctrl.state() == State::Idle) {
         prefs.putFloat("target", ctrl.targetC());
         prefs.putUShort("mins", ctrl.durationMin());
-        prefs.putBool("fan", ctrl.fanEnabled());
         savedFlash = true;
         savedAtMs  = now;
     }
@@ -1908,10 +1974,10 @@ void loop() {
 
     ctrl.update(now, lastReading, ev, fresh);
 
-    // Heater is commanded only from the two heating states, and only with a
+    // Heater is commanded only from the heating states, and only with a
     // working display. Every other path is an explicit off.
     const State st = ctrl.state();
-    const bool heating = (st == State::Preheat || st == State::Running);
+    const bool heating = (st == State::Preheat || st == State::Ready || st == State::Running);
     if (uiOk && heating && !otaActive) {
         heater.setDuty(ctrl.dutyPct());
     } else {
@@ -1919,16 +1985,25 @@ void loop() {
     }
     heater.service(now);
 
-    // Fan stirs the chamber for the whole cycle, and keeps moving air across
-    // the plate after an over-temperature trip.
-    fanSet(ctrl.fanEnabled() && (heating || st == State::SafetyTrip));
-
     // Cycle done: long beep, pause, repeat until a key leaves the Complete screen.
     static uint32_t lastDoneBeepMs = 0;
     if (st == State::Complete &&
         (lastState != State::Complete || now - lastDoneBeepMs >= BEEP_DONE_PERIOD_MS)) {
         buzzer.beep(now, BEEP_DONE_MS);
         lastDoneBeepMs = now;
+    }
+    // Step 4, at temperature: two short beeps, pause, repeat until a key.
+    static uint32_t readyBeepMs = 0;
+    static bool     readySecond = false;
+    if (st == State::Ready) {
+        if (lastState != State::Ready || now - readyBeepMs >= BEEP_READY_PERIOD_MS) {
+            buzzer.beep(now, BEEP_READY_MS);
+            readyBeepMs = now;
+            readySecond = true;
+        } else if (readySecond && now - readyBeepMs >= 2 * BEEP_READY_MS) {
+            buzzer.beep(now, BEEP_READY_MS);
+            readySecond = false;
+        }
     }
     lastState = st;
     buzzer.service(now);
@@ -1944,12 +2019,11 @@ void loop() {
     // retune PID_KP/KI/KD against it instead of my estimates.
     if ((now - lastLogMs) >= 1000) {
         lastLogMs = now;
-        Serial.printf("t=%lus state=%d temp=%.2f valid=%d target=%.0f duty=%.1f htr=%d fan=%d rem=%lus heap=%u minheap=%u\n",
+        Serial.printf("t=%lus state=%d temp=%.2f valid=%d target=%.0f duty=%.1f htr=%d rem=%lus heap=%u minheap=%u\n",
                       static_cast<unsigned long>(now / 1000),
                       static_cast<int>(st),
                       ctrl.tempC(), ctrl.tempValid() ? 1 : 0,
                       ctrl.targetC(), ctrl.dutyPct(), heater.isOn() ? 1 : 0,
-                      fanOn ? 1 : 0,
                       static_cast<unsigned long>(ctrl.remainingMs() / 1000),
                       // Free heap now and its lowest point since boot: a steady
                       // minheap over hours means no leak.

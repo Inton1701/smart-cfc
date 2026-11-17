@@ -24,6 +24,22 @@ static void tickT(float tempC, uint32_t dtMs, ButtonEvents ev = ButtonEvents{}) 
     tick(good(tempC), dtMs, ev);
 }
 
+// Hold SEL, then a key on step 1 (hot water) and step 2 (cup): heater starts.
+static void startHeating(float tempC = 30.0f) {
+    ButtonEvents hold; hold.selHold = true;
+    ButtonEvents key;  key.anyTap  = true;
+    tickT(tempC, 250, hold);
+    tickT(tempC, 250, key);
+    tickT(tempC, 250, key);
+}
+// Reach the target (step 4), then a key starts the timer.
+static void startRunning() {
+    ButtonEvents key; key.anyTap = true;
+    startHeating();
+    tickT(TARGET_DEFAULT_C, 250);
+    tickT(TARGET_DEFAULT_C, 250, key);
+}
+
 void setUp() {
     c = Controller();
     nowMs = 10000;
@@ -60,16 +76,9 @@ static void test_next_cycles_field_and_inc_dec_adjust_it() {
     tickT(30.0f, 250, back);
     TEST_ASSERT_EQUAL(static_cast<int>(Field::Target), static_cast<int>(c.field()));
 
-    // BEFORE from Target wraps to Fan; INC toggles the fan, DEC toggles it back.
+    // Two fields: BEFORE from Target wraps to Duration, NEXT wraps back.
     tickT(30.0f, 250, back);
-    TEST_ASSERT_EQUAL(static_cast<int>(Field::Fan), static_cast<int>(c.field()));
-    TEST_ASSERT_TRUE(c.fanEnabled());
-    tickT(30.0f, 250, up);
-    TEST_ASSERT_FALSE(c.fanEnabled());
-    ButtonEvents down; down.decStep = true;
-    tickT(30.0f, 250, down);
-    TEST_ASSERT_TRUE(c.fanEnabled());
-    // NEXT from Fan wraps to Target.
+    TEST_ASSERT_EQUAL(static_cast<int>(Field::Duration), static_cast<int>(c.field()));
     tickT(30.0f, 250, tap);
     TEST_ASSERT_EQUAL(static_cast<int>(Field::Target), static_cast<int>(c.field()));
 }
@@ -108,11 +117,57 @@ static void test_sel_tap_alone_never_starts_a_cycle() {
     TEST_ASSERT_EQUAL_FLOAT(0.0f, c.dutyPct());
 }
 
-static void test_hold_starts_cycle() {
+static void test_hold_walks_through_the_steps_before_heating() {
     ButtonEvents hold; hold.selHold = true;
+    ButtonEvents key;  key.anyTap  = true;
+
     tickT(30.0f, 250, hold);
+    TEST_ASSERT_EQUAL(static_cast<int>(State::StepWater), static_cast<int>(c.state()));
+    // A step waits for the operator and never heats, however long it sits.
+    tickT(30.0f, 10UL * 60UL * 1000UL);
+    TEST_ASSERT_EQUAL(static_cast<int>(State::StepWater), static_cast<int>(c.state()));
+    TEST_ASSERT_EQUAL_FLOAT(0.0f, c.dutyPct());
+
+    tickT(30.0f, 250, key);
+    TEST_ASSERT_EQUAL(static_cast<int>(State::StepCup), static_cast<int>(c.state()));
+    for (int i = 0; i < 8; ++i) tickT(30.0f, 250);
+    TEST_ASSERT_EQUAL(static_cast<int>(State::StepCup), static_cast<int>(c.state()));
+    TEST_ASSERT_EQUAL_FLOAT(0.0f, c.dutyPct());
+
+    tickT(30.0f, 250, key);
     TEST_ASSERT_EQUAL(static_cast<int>(State::Preheat), static_cast<int>(c.state()));
     TEST_ASSERT_EQUAL_UINT32(DURATION_DEFAULT_MIN * 60UL * 1000UL, c.remainingMs());
+}
+
+static void test_hold_sel_cancels_every_step() {
+    ButtonEvents hold; hold.selHold = true;
+    ButtonEvents key;  key.anyTap  = true;
+
+    tickT(30.0f, 250, hold);
+    tickT(30.0f, 250, hold);
+    TEST_ASSERT_EQUAL(static_cast<int>(State::Idle), static_cast<int>(c.state()));
+
+    tickT(30.0f, 250, hold);
+    tickT(30.0f, 250, key);
+    tickT(30.0f, 250, hold);
+    TEST_ASSERT_EQUAL(static_cast<int>(State::Idle), static_cast<int>(c.state()));
+
+    startHeating();
+    tickT(TARGET_DEFAULT_C, 250);
+    TEST_ASSERT_EQUAL(static_cast<int>(State::Ready), static_cast<int>(c.state()));
+    tickT(TARGET_DEFAULT_C, 250, hold);
+    TEST_ASSERT_EQUAL(static_cast<int>(State::Idle), static_cast<int>(c.state()));
+    TEST_ASSERT_EQUAL_FLOAT(0.0f, c.dutyPct());
+}
+
+static void test_ready_times_out_with_the_heater_off() {
+    startHeating();
+    tickT(TARGET_DEFAULT_C, 250);
+    tickT(TARGET_DEFAULT_C, READY_TIMEOUT_MS - 1000);
+    TEST_ASSERT_EQUAL(static_cast<int>(State::Ready), static_cast<int>(c.state()));
+    tickT(TARGET_DEFAULT_C, 2000);
+    TEST_ASSERT_EQUAL(static_cast<int>(State::Idle), static_cast<int>(c.state()));
+    TEST_ASSERT_EQUAL_FLOAT(0.0f, c.dutyPct());
 }
 
 static void test_hold_refused_without_a_valid_reading() {
@@ -120,13 +175,13 @@ static void test_hold_refused_without_a_valid_reading() {
     // Three bad reads latch a fault; a hold must not start anything.
     for (int i = 0; i < FAULT_STRIKES; ++i) tick(openProbe(), 250);
     tick(openProbe(), 250, hold);
-    TEST_ASSERT_NOT_EQUAL(static_cast<int>(State::Preheat), static_cast<int>(c.state()));
+    TEST_ASSERT_EQUAL(static_cast<int>(State::Fault), static_cast<int>(c.state()));
     TEST_ASSERT_EQUAL_FLOAT(0.0f, c.dutyPct());
 }
 
-static void test_preheat_heats_then_hands_over_to_running() {
-    ButtonEvents hold; hold.selHold = true;
-    tickT(30.0f, 250, hold);
+static void test_preheat_heats_then_waits_for_the_cyanoacrylate() {
+    ButtonEvents key; key.anyTap = true;
+    startHeating();
 
     // Proportional-on-measurement brakes on a sudden rise, so give the
     // integral a couple of seconds at a steady cold reading.
@@ -135,15 +190,20 @@ static void test_preheat_heats_then_hands_over_to_running() {
     TEST_ASSERT_TRUE(c.dutyPct() > 0.0f);            // heater demanded while cold
     TEST_ASSERT_EQUAL_UINT32(DURATION_DEFAULT_MIN * 60UL * 1000UL, c.remainingMs());
 
-    // Reaching target minus hysteresis starts the dwell.
+    // At target (step 4) it keeps holding temperature; the timer waits.
     tickT(TARGET_DEFAULT_C - HYSTERESIS_C, 250);
+    TEST_ASSERT_EQUAL(static_cast<int>(State::Ready), static_cast<int>(c.state()));
+    for (int i = 0; i < 200; ++i) tickT(TARGET_DEFAULT_C - 3.0f, 250);   // 50 s
+    TEST_ASSERT_EQUAL(static_cast<int>(State::Ready), static_cast<int>(c.state()));
+    TEST_ASSERT_TRUE(c.dutyPct() > 0.0f);
+    TEST_ASSERT_EQUAL_UINT32(DURATION_DEFAULT_MIN * 60UL * 1000UL, c.remainingMs());
+
+    tickT(TARGET_DEFAULT_C, 250, key);
     TEST_ASSERT_EQUAL(static_cast<int>(State::Running), static_cast<int>(c.state()));
 }
 
 static void test_countdown_runs_out_and_turns_the_heater_off() {
-    ButtonEvents hold; hold.selHold = true;
-    tickT(30.0f, 250, hold);
-    tickT(TARGET_DEFAULT_C, 250);
+    startRunning();
     TEST_ASSERT_EQUAL(static_cast<int>(State::Running), static_cast<int>(c.state()));
 
     for (int i = 0; i < DURATION_DEFAULT_MIN; ++i) tickT(TARGET_DEFAULT_C, 60000);
@@ -154,9 +214,7 @@ static void test_countdown_runs_out_and_turns_the_heater_off() {
 }
 
 static void test_complete_screen_waits_for_a_key() {
-    ButtonEvents hold; hold.selHold = true;
-    tickT(30.0f, 250, hold);
-    tickT(TARGET_DEFAULT_C, 250);
+    startRunning();
     for (int i = 0; i < DURATION_DEFAULT_MIN; ++i) tickT(TARGET_DEFAULT_C, 60000);
     TEST_ASSERT_EQUAL(static_cast<int>(State::Complete), static_cast<int>(c.state()));
 
@@ -176,13 +234,12 @@ static void test_sel_stops_from_preheat_and_running() {
     ButtonEvents hold; hold.selHold = true;
     ButtonEvents sel;  sel.selTap = true;
 
-    tickT(30.0f, 250, hold);
+    startHeating();
     tickT(30.0f, 250, sel);
     TEST_ASSERT_EQUAL(static_cast<int>(State::Idle), static_cast<int>(c.state()));
     TEST_ASSERT_EQUAL_FLOAT(0.0f, c.dutyPct());
 
-    tickT(30.0f, 250, hold);
-    tickT(TARGET_DEFAULT_C, 250);
+    startRunning();
     TEST_ASSERT_EQUAL(static_cast<int>(State::Running), static_cast<int>(c.state()));
     tickT(TARGET_DEFAULT_C, 250, sel);
     TEST_ASSERT_EQUAL(static_cast<int>(State::Idle), static_cast<int>(c.state()));
@@ -190,7 +247,7 @@ static void test_sel_stops_from_preheat_and_running() {
     TEST_ASSERT_EQUAL_UINT32(0, c.remainingMs());
 
     // A hold stops too: stopping must never be harder than starting.
-    tickT(30.0f, 250, hold);
+    startHeating();
     TEST_ASSERT_EQUAL(static_cast<int>(State::Preheat), static_cast<int>(c.state()));
     tickT(30.0f, 250, hold);
     TEST_ASSERT_EQUAL(static_cast<int>(State::Idle), static_cast<int>(c.state()));
@@ -199,10 +256,9 @@ static void test_sel_stops_from_preheat_and_running() {
 // ---- safety ----
 
 static void test_overtemp_latches_and_will_not_clear_while_hot() {
-    ButtonEvents hold; hold.selHold = true;
     ButtonEvents sel;  sel.selTap = true;
 
-    tickT(30.0f, 250, hold);
+    startHeating();
     tickT(SAFETY_MAX_C + 2.0f, 250);
     TEST_ASSERT_EQUAL(static_cast<int>(State::SafetyTrip), static_cast<int>(c.state()));
     TEST_ASSERT_EQUAL_FLOAT(0.0f, c.dutyPct());
@@ -229,9 +285,7 @@ static void test_overtemp_outranks_a_sensor_fault() {
 }
 
 static void test_sensor_fault_stops_heater_and_timer() {
-    ButtonEvents hold; hold.selHold = true;
-    tickT(30.0f, 250, hold);
-    tickT(TARGET_DEFAULT_C, 250);
+    startRunning();
     TEST_ASSERT_EQUAL(static_cast<int>(State::Running), static_cast<int>(c.state()));
     const uint32_t remaining = c.remainingMs();
 
@@ -265,8 +319,7 @@ static void test_sensor_fault_clears_only_once_readings_return() {
 }
 
 static void test_preheat_timeout_faults_when_it_never_gets_hot() {
-    ButtonEvents hold; hold.selHold = true;
-    tickT(30.0f, 250, hold);
+    startHeating();
     for (int i = 0; i < 20; ++i) tickT(30.0f, 60000);   // 20 min, never rises
     TEST_ASSERT_EQUAL(static_cast<int>(State::Fault), static_cast<int>(c.state()));
     TEST_ASSERT_EQUAL(static_cast<int>(FaultCode::PreheatTimeout),
@@ -275,8 +328,7 @@ static void test_preheat_timeout_faults_when_it_never_gets_hot() {
 }
 
 static void test_duty_is_capped_and_never_negative() {
-    ButtonEvents hold; hold.selHold = true;
-    tickT(30.0f, 250, hold);
+    startHeating();
     for (int i = 0; i < 50; ++i) {
         tickT(30.0f, 250);
         TEST_ASSERT_TRUE(c.dutyPct() >= 0.0f);
@@ -292,15 +344,16 @@ static void test_duty_is_capped_and_never_negative() {
 // lag 66 s. Check the controller now arrives without coasting past.
 static float simulatePeak(float target) {
     c.setSettings(target, 20);
-    ButtonEvents hold; hold.selHold = true;
+    ButtonEvents none, key; key.anyTap = true;
     float pad = 30.0f, probe = 30.0f, peak = 0.0f;
-    tickT(probe, 250, hold);
+    startHeating(probe);
     for (int i = 0; i < 4 * 900; ++i) {                  // 15 min in 250 ms steps
         const float watts = 300.0f * c.dutyPct() / 100.0f;
         pad   += (watts - 0.6f * (pad - 30.0f)) / 40.0f * 0.25f;
         probe += (pad - probe) / 66.0f * 0.25f;          // 66 s probe lag
         const float reading = floorf(probe * 4.0f) / 4.0f;   // MAX6675 0.25 C steps
-        tickT(reading, 250);
+        // Step 4: the operator adds the cyanoacrylate and presses a key.
+        tickT(reading, 250, c.state() == State::Ready ? key : none);
         if (reading > peak) peak = reading;
     }
     return peak;
@@ -321,9 +374,11 @@ int main(int, char**) {
     RUN_TEST(test_adjust_clamps_at_limits);
     RUN_TEST(test_saved_settings_are_restored_only_when_in_range);
     RUN_TEST(test_sel_tap_alone_never_starts_a_cycle);
-    RUN_TEST(test_hold_starts_cycle);
+    RUN_TEST(test_hold_walks_through_the_steps_before_heating);
+    RUN_TEST(test_hold_sel_cancels_every_step);
+    RUN_TEST(test_ready_times_out_with_the_heater_off);
     RUN_TEST(test_hold_refused_without_a_valid_reading);
-    RUN_TEST(test_preheat_heats_then_hands_over_to_running);
+    RUN_TEST(test_preheat_heats_then_waits_for_the_cyanoacrylate);
     RUN_TEST(test_countdown_runs_out_and_turns_the_heater_off);
     RUN_TEST(test_complete_screen_waits_for_a_key);
     RUN_TEST(test_sel_stops_from_preheat_and_running);
