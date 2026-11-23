@@ -1,0 +1,748 @@
+<title>Smart CFC Chamber Model</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Sans+Condensed:wght@600&display=swap">
+<style>
+/* Layout: a workbench. Big model stage on the left, a narrow spec sheet on the right; stacks on phones. */
+:root {
+  --bg: #eef1f2; --panel: #ffffff; --fg: #1b2226; --mute: #5b676e; --line: #d4dadd;
+  --accent: #0b6e8a; --accent-ink: #ffffff; --stage: #f6f8f8;
+  --f-display: "IBM Plex Sans Condensed", "Arial Narrow", system-ui, sans-serif;
+  --f-body: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --f-mono: "IBM Plex Mono", ui-monospace, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #12171a; --panel: #1a2125; --fg: #e3e9ec; --mute: #93a1a8; --line: #2b353a;
+  --accent: #5cc3df; --accent-ink: #0b1a20; color-scheme: dark } }
+:root[data-theme="dark"] {
+  --bg: #12171a; --panel: #1a2125; --fg: #e3e9ec; --mute: #93a1a8; --line: #2b353a;
+  --accent: #5cc3df; --accent-ink: #0b1a20; color-scheme: dark }
+body { background: var(--bg); color: var(--fg); font: 14px/1.5 var(--f-body);
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-block: 20px 28px; }
+[hidden] { display: none !important; }
+.wrap { max-width: 1240px; margin: 0 auto; display: grid; gap: 14px; }
+header { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 6px 18px; }
+h1 { font: 600 26px/1.1 var(--f-display); letter-spacing: .01em; margin: 0; text-wrap: balance; }
+.sub { color: var(--mute); margin: 0; }
+.bench { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 14px; align-items: start; }
+@media (max-width: 860px) { .bench { grid-template-columns: minmax(0, 1fr); } }
+.stage { position: relative; background: var(--stage); border: 1px solid var(--line); border-radius: 8px;
+  aspect-ratio: 4 / 3; max-width: 100%; overflow: hidden; touch-action: none; }
+.stage canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+#overlay { pointer-events: none; }
+.hint { position: absolute; left: 10px; bottom: 8px; font: 12px var(--f-mono); color: #66737a; pointer-events: none; }
+aside { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 14px; display: grid; gap: 16px; min-width: 0; }
+.group { display: grid; gap: 8px; }
+.group h2 { font: 600 12px/1 var(--f-body); text-transform: uppercase; letter-spacing: .08em; color: var(--mute); margin: 0; }
+.views { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+button { font: 500 13px var(--f-body); padding: 7px 8px; border-radius: 6px; border: 1px solid var(--line);
+  background: transparent; color: var(--fg); cursor: pointer; }
+button:hover { border-color: var(--accent); }
+button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+button[aria-pressed="true"] { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+button.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); font-weight: 600; padding: 9px; }
+.toggles { display: grid; gap: 6px; }
+.toggles label { display: flex; align-items: center; gap: 8px; cursor: pointer; }
+.dims { display: grid; grid-template-columns: 1fr auto; gap: 6px 10px; align-items: center; }
+.dims label { color: var(--fg); }
+.dims .in { display: flex; align-items: center; gap: 4px; font: 12px var(--f-mono); color: var(--mute); }
+.dims input { width: 62px; font: 13px var(--f-mono); padding: 4px 6px; border: 1px solid var(--line); border-radius: 5px;
+  background: var(--bg); color: var(--fg); text-align: right; font-variant-numeric: tabular-nums; }
+.readout { font: 12px var(--f-mono); color: var(--mute); font-variant-numeric: tabular-nums; }
+.shot { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 14px; display: grid; gap: 8px; }
+.shot img { border: 1px solid var(--line); border-radius: 4px; background: #fff; }
+.shot p { margin: 0; color: var(--mute); }
+.note { font-size: 12px; color: var(--mute); margin: 0; }
+/* #render;...: bare full-window stage for making manual figures */
+body.render { padding: 0; background: #fff; }
+.render header, .render aside, .render .shot, .render .hint { display: none !important; }
+.render .stage { position: fixed; inset: 0; border: 0; border-radius: 0; aspect-ratio: auto; background: #fff; }
+</style>
+
+<div class="wrap">
+  <header>
+    <h1>Smart CFC Chamber Model</h1>
+    <p class="sub">Portable cyanoacrylate fuming chamber, sizes in centimetres</p>
+  </header>
+
+  <div class="bench">
+    <div class="stage" id="stage">
+      <canvas id="gl"></canvas>
+      <canvas id="overlay"></canvas>
+      <span class="hint">drag: rotate · scroll/pinch: zoom · right-drag: pan</span>
+    </div>
+
+    <aside>
+      <div class="group">
+        <h2>View</h2>
+        <div class="views" id="views">
+          <button id="v-iso" data-view="iso" aria-pressed="true">3/4</button>
+          <button id="v-front" data-view="front" aria-pressed="false">Front</button>
+          <button id="v-side" data-view="side" aria-pressed="false">Side</button>
+          <button id="v-top" data-view="top" aria-pressed="false">Top</button>
+          <button id="v-back" data-view="back" aria-pressed="false">Back</button>
+          <button id="v-low" data-view="low" aria-pressed="false">Low</button>
+        </div>
+      </div>
+
+      <div class="group">
+        <h2>Show</h2>
+        <div class="toggles">
+          <label for="t-labels"><input id="t-labels" type="checkbox" checked> Part labels</label>
+          <label for="t-explode"><input id="t-explode" type="checkbox"> Exploded view</label>
+          <label for="t-cup"><input id="t-cup" type="checkbox" checked> Foil cup</label>
+          <label for="t-water"><input id="t-water" type="checkbox" checked> Water tray</label>
+        </div>
+      </div>
+
+      <div class="group">
+        <h2>Sizes (cm)</h2>
+        <div class="dims" id="dims"></div>
+        <div class="readout" id="overall"></div>
+        <button id="reset">Reset sizes</button>
+      </div>
+
+      <div class="group">
+        <button class="primary" id="snap">Take picture for manual</button>
+        <p class="note">Renders the current view at 3× resolution on a white background, labels included.</p>
+      </div>
+    </aside>
+  </div>
+
+  <section class="shot" id="shot" hidden>
+    <p>Right-click the picture and choose <b>Save image as</b> (on a phone, press and hold it).</p>
+    <img id="shot-img" alt="Rendered view of the fuming chamber">
+  </section>
+</div>
+
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/",
+  "sim": "./sim.js",
+  "oled": "./oled.js",
+  "play": "./play.js"
+} }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
+
+// ---------- sizes (cm), estimated from the photos and the materials list ----------
+const DEF = { boxW: 40, boxD: 28, boxH: 27, legH: 10, grillW: 25, grillD: 26, grillH: 5, padW: 8, padD: 10,
+  ctrlW: 22, ctrlD: 15, ctrlH: 6.5 };
+const FIELDS = [
+  ['boxW', 'Chamber width'], ['boxD', 'Chamber depth'], ['boxH', 'Chamber height'], ['legH', 'Leg height'],
+  ['grillW', 'Grill width'], ['grillD', 'Grill depth'], ['grillH', 'Grill height'],
+  ['padW', 'Heating pad width'], ['padD', 'Heating pad depth'],
+  ['ctrlW', 'Controller width'], ['ctrlD', 'Controller depth'], ['ctrlH', 'Controller height'],
+];
+const STORE = 'cfc-model-sizes-v3';
+let P = { ...DEF };
+try { Object.assign(P, JSON.parse(localStorage.getItem(STORE) || '{}')); } catch (e) {}
+
+// ---------- renderer, scene, camera ----------
+const stage = document.getElementById('stage');
+const glCanvas = document.getElementById('gl');
+const overlay = document.getElementById('overlay');
+const octx = overlay.getContext('2d');
+const STAGE_BG = 0xf6f8f8;
+
+const renderer = new THREE.WebGLRenderer({ canvas: glCanvas, antialias: true, preserveDrawingBuffer: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setClearColor(STAGE_BG, 1);
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(32, 4 / 3, 1, 2000);
+const controls = new OrbitControls(camera, glCanvas);
+controls.enableDamping = true;
+controls.dampingFactor = 0.08;
+
+scene.add(new THREE.HemisphereLight(0xffffff, 0x9aa3a8, 1.25));
+const sun = new THREE.DirectionalLight(0xffffff, 1.7);
+sun.position.set(35, 70, 45);
+sun.castShadow = true;
+sun.shadow.mapSize.set(2048, 2048);
+Object.assign(sun.shadow.camera, { left: -60, right: 60, top: 60, bottom: -60, near: 1, far: 220 });
+sun.shadow.bias = -0.0004;
+scene.add(sun);
+const fill = new THREE.DirectionalLight(0xdfefff, 0.55);
+fill.position.set(-40, 25, -30);
+scene.add(fill);
+
+const ground = new THREE.Mesh(new THREE.PlaneGeometry(400, 400), new THREE.ShadowMaterial({ opacity: 0.16 }));
+ground.rotation.x = -Math.PI / 2;
+ground.receiveShadow = true;
+scene.add(ground);
+
+// ---------- helpers ----------
+function rrShape(w, h, r) {
+  const s = new THREE.Shape(), x = -w / 2, y = -h / 2;
+  s.moveTo(x + r, y);
+  s.lineTo(x + w - r, y); s.absarc(x + w - r, y + r, r, -Math.PI / 2, 0, false);
+  s.lineTo(x + w, y + h - r); s.absarc(x + w - r, y + h - r, r, 0, Math.PI / 2, false);
+  s.lineTo(x + r, y + h); s.absarc(x + r, y + h - r, r, Math.PI / 2, Math.PI, false);
+  s.lineTo(x, y + r); s.absarc(x + r, y + r, r, Math.PI, Math.PI * 1.5, false);
+  return s;
+}
+// Rounded-rectangle slab lying flat (footprint w x d), from y0 up by h.
+function slab(w, d, r, h, y0, mat) {
+  const g = new THREE.ExtrudeGeometry(rrShape(w, d, r), { depth: h, bevelEnabled: false, curveSegments: 14 });
+  g.rotateX(-Math.PI / 2);
+  const m = new THREE.Mesh(g, mat);
+  m.position.y = y0;
+  return m;
+}
+// Outline loop of a rounded rectangle footprint at height y.
+function loop(w, d, r, y, mat) {
+  const pts = rrShape(w, d, r).getPoints(14).map(p => new THREE.Vector3(p.x, y, -p.y));
+  return new THREE.LineLoop(new THREE.BufferGeometry().setFromPoints(pts), mat);
+}
+function seg(a, b, mat) { return new THREE.Line(new THREE.BufferGeometry().setFromPoints([a, b]), mat); }
+function solid(geo, mat, x = 0, y = 0, z = 0) {
+  const m = new THREE.Mesh(geo, mat);
+  m.position.set(x, y, z);
+  m.castShadow = true; m.receiveShadow = true;
+  return m;
+}
+// Round rod from a to b.
+function rod(a, b, r, mat) {
+  const d = new THREE.Vector3().subVectors(b, a);
+  const m = solid(new THREE.CylinderGeometry(r, r, d.length(), 12), mat);
+  m.position.copy(a).addScaledVector(d, 0.5);
+  m.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), d.normalize());
+  return m;
+}
+function tube(points, r, mat) {
+  return solid(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(points), 90, r, 8), mat);
+}
+function canvasTexture(w, h, draw) {
+  const c = document.createElement('canvas'); c.width = w; c.height = h;
+  draw(c.getContext('2d'), w, h);
+  const t = new THREE.CanvasTexture(c);
+  t.colorSpace = THREE.SRGBColorSpace;
+  t.anisotropy = 8;
+  return t;
+}
+function roundRect(ctx, x, y, w, h, r) {
+  ctx.beginPath(); ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath();
+}
+const V = (x, y, z) => new THREE.Vector3(x, y, z);
+
+// ---------- materials ----------
+const oledTex = canvasTexture(512, 256, (c, w, h) => {
+  c.fillStyle = '#040506'; c.fillRect(0, 0, w, h);
+  c.fillStyle = '#e8f3ff'; c.strokeStyle = '#e8f3ff'; c.lineWidth = 4;
+  c.font = 'bold 30px monospace'; c.fillText('SETUP', 16, 42); c.textAlign = 'right'; c.fillText('31.5°C', w - 16, 42);
+  c.fillRect(0, 56, w, 3);
+  c.fillRect(10, 70, 236, 128); roundRect(c, 266, 70, 236, 128, 10); c.stroke();
+  c.textAlign = 'center'; c.font = 'bold 58px monospace';
+  c.fillStyle = '#040506'; c.fillText('48°C', 128, 158);
+  c.fillStyle = '#e8f3ff'; c.fillText('5min', 384, 158);
+  c.font = 'bold 24px monospace'; c.textAlign = 'left'; c.fillText('SEL:save hold:start', 12, 240);
+});
+// Square membrane keypad: SEL in the middle, INC up, DEC down, BEFORE left, NEXT right.
+const keypadTex = canvasTexture(512, 512, (c, w, h) => {
+  const g = c.createLinearGradient(0, 0, w, h);
+  g.addColorStop(0, '#eef2f4'); g.addColorStop(1, '#c8d0d4');
+  c.fillStyle = g; c.fillRect(0, 0, w, h);
+  c.fillStyle = 'rgba(0,0,0,0.05)';
+  for (let i = 0; i < w; i += 5) c.fillRect(i, 0, 1, h);
+  const cx = w / 2, cy = h / 2;
+  const keys = [['INC', -90, '#86cf9f'], ['NEXT', 0, '#86d6ec'], ['DEC', 90, '#86cf9f'], ['BEFORE', 180, '#86d6ec']];
+  c.textAlign = 'center'; c.textBaseline = 'middle';
+  for (const [t, a, col] of keys) {
+    const r = a * Math.PI / 180, kx = cx + Math.cos(r) * 150, ky = cy + Math.sin(r) * 150;
+    c.save(); c.translate(kx, ky); c.rotate(r);
+    c.beginPath(); c.moveTo(72, 0); c.lineTo(-42, -80); c.lineTo(-42, 80); c.closePath();
+    c.fillStyle = col; c.fill(); c.strokeStyle = '#4d6c78'; c.lineWidth = 4; c.stroke();
+    c.restore();
+    c.fillStyle = '#1d2a33'; c.font = 'bold 30px sans-serif'; c.fillText(t, kx, ky);
+  }
+  c.beginPath(); c.arc(cx, cy, 64, 0, Math.PI * 2); c.fillStyle = '#93def1'; c.fill(); c.strokeStyle = '#4d6c78'; c.stroke();
+  c.fillStyle = '#1d2a33'; c.font = 'bold 40px sans-serif'; c.fillText('SEL', cx, cy);
+});
+const woodTex = canvasTexture(512, 512, (c, w, h) => {
+  c.fillStyle = '#8a5530'; c.fillRect(0, 0, w, h);
+  for (let y = 0; y < h; y += 2) {
+    const v = Math.sin(y * 0.09 + Math.sin(y * 0.013) * 4) * 0.5 + 0.5;
+    c.fillStyle = `rgba(${60 + v * 70}, ${32 + v * 34}, ${14 + v * 14}, 0.55)`;
+    c.fillRect(0, y, w, 2);
+  }
+});
+const pushTex = canvasTexture(128, 128, (c, w, h) => {
+  c.fillStyle = '#9aa1a6'; c.fillRect(0, 0, w, h);
+  c.fillStyle = '#e9ecee'; c.font = 'bold 30px sans-serif'; c.textAlign = 'center'; c.textBaseline = 'middle';
+  c.save(); c.translate(w / 2, h / 2); c.rotate(-Math.PI / 2); c.fillText('PUSH', 0, 0); c.restore();
+});
+const M = {
+  acrylic: new THREE.MeshPhysicalMaterial({ color: 0xe6f6ff, transparent: true, opacity: 0.13, roughness: 0.04,
+    clearcoat: 1, side: THREE.DoubleSide, depthWrite: false }),
+  door: new THREE.MeshPhysicalMaterial({ color: 0xdff1fb, transparent: true, opacity: 0.18, roughness: 0.06,
+    clearcoat: 1, side: THREE.DoubleSide, depthWrite: false }),
+  edge: new THREE.LineBasicMaterial({ color: 0x7f97a3 }),
+  edgeDoor: new THREE.LineBasicMaterial({ color: 0x5f7884 }),
+  gasket: new THREE.MeshStandardMaterial({ color: 0x15191c, roughness: 0.7, side: THREE.DoubleSide }),
+  black: new THREE.MeshStandardMaterial({ color: 0x1c1f22, roughness: 0.45, metalness: 0.2 }),
+  rubber: new THREE.MeshStandardMaterial({ color: 0x0f1113, roughness: 0.9 }),
+  steel: new THREE.MeshStandardMaterial({ color: 0xc3c9cd, roughness: 0.28, metalness: 0.85 }),
+  mount: new THREE.MeshStandardMaterial({ color: 0x3d4347, roughness: 0.4, metalness: 0.6 }),
+  alu: new THREE.MeshStandardMaterial({ color: 0xd3d8db, roughness: 0.45, metalness: 0.7 }),
+  foil: new THREE.MeshStandardMaterial({ color: 0xd5dadd, roughness: 0.32, metalness: 0.85, side: THREE.DoubleSide }),
+  kapton: new THREE.MeshStandardMaterial({ color: 0xe0a425, roughness: 0.5 }),
+  wood: new THREE.MeshStandardMaterial({ map: woodTex, roughness: 0.75 }),
+  braid: new THREE.MeshStandardMaterial({ color: 0xa9b0b4, roughness: 0.5, metalness: 0.7 }),
+  white: new THREE.MeshStandardMaterial({ color: 0xf1f2f2, roughness: 0.5 }),
+  grey: new THREE.MeshStandardMaterial({ color: 0xa3aaae, roughness: 0.5 }),
+  push: new THREE.MeshStandardMaterial({ map: pushTex, roughness: 0.5 }),
+  wire: new THREE.MeshStandardMaterial({ color: 0x111316, roughness: 0.6 }),
+  grill: new THREE.MeshStandardMaterial({ color: 0x1a1c1e, roughness: 0.5, metalness: 0.4 }),
+  cap: new THREE.MeshStandardMaterial({ color: 0x6d7378, roughness: 0.8 }),
+  case: new THREE.MeshStandardMaterial({ color: 0x1e2226, roughness: 0.6, metalness: 0.1 }),
+  switchRed: new THREE.MeshStandardMaterial({ color: 0xd11b1b, emissive: 0x6a0000, roughness: 0.35 }),
+  water: new THREE.MeshPhysicalMaterial({ color: 0x8fc7dc, roughness: 0.05, transparent: true, opacity: 0.85 }),
+  oled: new THREE.MeshBasicMaterial({ map: oledTex }),
+  keypad: new THREE.MeshStandardMaterial({ map: keypadTex, roughness: 0.55 }),
+};
+
+// ---------- model ----------
+let model = null;
+const parts = {};
+let labels = [];
+
+function build() {
+  if (model) { scene.remove(model); model.traverse(n => { if (n.geometry) n.geometry.dispose(); }); }
+  model = new THREE.Group();
+  labels = [];
+  const { boxW: W, boxD: D, boxH: H, legH, grillW, grillD, grillH, padW, padD, ctrlW, ctrlD, ctrlH } = P;
+  const r = 2.6, floorY = legH, topY = legH + H, front = D / 2;
+
+  // Chamber: clear box, flat top, door on the front.
+  const chamber = new THREE.Group();
+  const shell = new THREE.Group();
+  chamber.add(shell);
+  shell.add(slab(W, D, r, H, floorY, M.acrylic));
+  for (const y of [floorY, topY]) shell.add(loop(W, D, r, y, M.edge));
+  const c45 = Math.SQRT1_2;
+  for (const sx of [-1, 1]) for (const sz of [-1, 1]) {
+    const x = sx * (W / 2 - r + r * c45), z = sz * (D / 2 - r + r * c45);
+    shell.add(seg(V(x, floorY, z), V(x, topY, z), M.edge));
+  }
+
+  // Front door: clear panel with a black gasket round its edge.
+  const door = new THREE.Group();
+  const dW = W - 0.4, dH = H - 0.4, dR = 2.4, dT = 0.5, doorY = floorY + H / 2;
+  const doorGeo = new THREE.ExtrudeGeometry(rrShape(dW, dH, dR), { depth: dT, bevelEnabled: false, curveSegments: 14 });
+  const doorMesh = new THREE.Mesh(doorGeo, M.door);
+  doorMesh.position.set(0, doorY, front - 0.1);
+  door.add(doorMesh);
+  const outline = rrShape(dW, dH, dR).getPoints(14);
+  for (const z of [front - 0.1, front - 0.1 + dT]) {
+    door.add(new THREE.LineLoop(new THREE.BufferGeometry().setFromPoints(outline.map(p => V(p.x, p.y + doorY, z))), M.edgeDoor));
+  }
+  const inset = 0.9, gW = 0.55;
+  const gasketShape = rrShape(dW - 2 * inset, dH - 2 * inset, dR - 0.4);
+  gasketShape.holes.push(rrShape(dW - 2 * inset - 2 * gW, dH - 2 * inset - 2 * gW, dR - 0.4 - gW));
+  const gasket = new THREE.Mesh(new THREE.ShapeGeometry(gasketShape, 14), M.gasket);
+  gasket.position.set(0, doorY, front - 0.12);
+  door.add(gasket);
+
+  // Door lock: one piece on the roof, strap over the front edge, one piece on the door.
+  const lockX = 0, podW = 3.2, podL = 4.6, podT = 1.5;
+  const lock = new THREE.Group();
+  const topPodZ = front - 4.2;
+  lock.add(solid(new RoundedBoxGeometry(podW, podT, podL, 3, 0.6), M.white, lockX, topY + podT / 2, topPodZ));
+  const btnTop = solid(new RoundedBoxGeometry(1.6, 0.3, 2.4, 2, 0.12), M.push, lockX, topY + podT + 0.05, topPodZ);
+  btnTop.rotation.y = Math.PI / 2; btnTop.rotation.z = 0;
+  lock.add(btnTop);
+  lock.add(solid(new THREE.BoxGeometry(2.0, 0.18, 4.4), M.white, lockX, topY + 0.1, front - 1.7));
+  lock.add(solid(new THREE.BoxGeometry(2.0, 7.2, 0.18), M.white, lockX, topY - 3.5, front + 0.55));
+  const lowPodY = topY - 7.2 - podL / 2 + 0.4;
+  lock.add(solid(new RoundedBoxGeometry(podW, podL, podT, 3, 0.6), M.white, lockX, lowPodY, front + 0.55 + podT / 2));
+  lock.add(solid(new RoundedBoxGeometry(1.6, 2.4, 0.3, 2, 0.12), M.push, lockX, lowPodY, front + 0.6 + podT));
+  door.add(lock);
+  chamber.add(door);
+
+  // Hanging rod: aluminium tube screwed to both side walls, S-hooks for the specimens.
+  const hang = new THREE.Group();
+  const rodHangY = topY - H / 3, rodR = 0.6, inW = W / 2 - 0.25;
+  hang.add(rod(V(-inW, rodHangY, 0), V(inW, rodHangY, 0), rodR, M.alu));
+  for (const sx of [-1, 1]) {
+    hang.add(solid(new THREE.CylinderGeometry(1.4, 1.4, 0.5, 32).rotateZ(Math.PI / 2), M.alu, sx * (inW - 0.25), rodHangY, 0));
+    for (const dz of [-0.85, 0.85]) {
+      hang.add(solid(new THREE.CylinderGeometry(0.32, 0.32, 0.25, 16).rotateZ(Math.PI / 2), M.steel, sx * (W / 2 + 0.12), rodHangY, dz));
+    }
+  }
+  const sPts = [[-0.75, -0.1], [-0.65, 0.5], [0, 0.82], [0.65, 0.5], [0.75, -0.2], [0.5, -1.3], [0, -2.3],
+    [-0.5, -3.3], [-0.75, -4.3], [-0.4, -5.0], [0.3, -5.05], [0.7, -4.5]];
+  const hookXs = [-W * 0.28, -W * 0.17, -W * 0.06];
+  for (const hx of hookXs) {
+    hang.add(tube(sPts.map(([z, y]) => V(hx, rodHangY + y, z)), 0.12, M.steel));
+  }
+  chamber.add(hang);
+
+  // Wire grill on the left, legs cut short, water tray on top.
+  const grill = new THREE.Group();
+  const gx = -W / 2 + 1.5 + grillW / 2, gz = 0, wr = 0.17, gTop = floorY + grillH;
+  const hx = grillW / 2, hz = grillD / 2;
+  const corners = [V(-hx, 0, -hz), V(hx, 0, -hz), V(hx, 0, hz), V(-hx, 0, hz)];
+  for (let i = 0; i < 4; i++) {
+    const a = corners[i], b = corners[(i + 1) % 4];
+    grill.add(rod(V(a.x, gTop, a.z), V(b.x, gTop, b.z), wr, M.grill));
+    grill.add(rod(V(a.x, floorY + 0.5, a.z), V(a.x, gTop, a.z), wr, M.grill));
+    grill.add(solid(new THREE.CylinderGeometry(0.28, 0.28, 0.6, 12), M.cap, a.x, floorY + 0.3, a.z));
+  }
+  const n = Math.max(2, Math.round(grillW / 1.1));
+  for (let i = 1; i < n; i++) {
+    const x = -hx + (grillW * i) / n;
+    grill.add(rod(V(x, gTop + 2 * wr, -hz), V(x, gTop + 2 * wr, hz), wr * 0.85, M.grill));
+  }
+  grill.position.set(gx, 0, gz);
+  chamber.add(grill);
+  const trayW = Math.min(6, grillW - 2), trayD = Math.min(6, grillD - 2);
+  const water = new THREE.Group();
+  water.add(solid(new RoundedBoxGeometry(trayW, 1.8, trayD, 2, 0.35), M.foil, 0, 0.9, 0));
+  water.add(solid(new THREE.PlaneGeometry(trayW - 0.6, trayD - 0.6).rotateX(-Math.PI / 2), M.water, 0, 1.82, 0));
+  water.position.set(gx - hx + 0.8 + trayW / 2, gTop + 4 * wr, gz - hz + 0.8 + trayD / 2);   // back-left corner
+  chamber.add(water);
+
+  // Heating pad on the right: wooden base, round feet, aluminium plate, foil cup on top.
+  const pad = new THREE.Group();
+  const px = W / 2 - 1 - padW / 2, pz = D / 2 - 10, woodH = 1.6, feetH = 1.1, plateT = 0.45;
+  const woodTop = floorY + woodH, plateBot = woodTop + feetH, plateTop = plateBot + plateT;
+  pad.add(solid(new RoundedBoxGeometry(padW, woodH, padD, 3, 0.35), M.wood, px, floorY + woodH / 2, pz));
+  const fx = padW / 2 - 1, fz = padD / 2 - 1;
+  for (const sx of [-1, 1]) for (const sz of [-1, 1]) {
+    pad.add(solid(new THREE.CylinderGeometry(0.85, 0.95, feetH, 24), M.steel, px + sx * fx, woodTop + feetH / 2, pz + sz * fz));
+    pad.add(solid(new THREE.CylinderGeometry(0.32, 0.32, 0.12, 12), M.steel, px + sx * fx, plateTop + 0.06, pz + sz * fz));
+  }
+  pad.add(solid(new THREE.BoxGeometry(padW, plateT, padD), M.alu, px, plateBot + plateT / 2, pz));
+  // Heater element block in the middle of the left edge; its two wires leave from there.
+  const edgeX = px - padW / 2;
+  pad.add(solid(new THREE.BoxGeometry(2.4, 0.5, 3.2), M.kapton, edgeX + 1.3, plateBot - 0.25, pz));
+  // Cable hole in the floor, between the grill and the pad: wires and probe go down to the controller.
+  const holeX = edgeX - 2.4, holeZ = pz - 0.8;
+  const hole = solid(new THREE.CircleGeometry(1.0, 32).rotateX(-Math.PI / 2), M.rubber, holeX, floorY + 0.03, holeZ);
+  pad.add(hole);
+  for (const dz of [-0.45, 0.45]) {
+    pad.add(tube([V(edgeX + 0.3, plateBot - 0.3, pz + dz), V(edgeX - 0.9, plateBot - 0.6, pz + dz),
+      V(holeX + 0.3, floorY + 1.0, holeZ + dz * 0.6), V(holeX + dz * 0.4, floorY - 1.0, holeZ)], 0.13, M.wire));
+  }
+  chamber.add(pad);
+
+  const cup = new THREE.Group();
+  const cupGeo = new THREE.CylinderGeometry(2.4, 1.9, 1.3, 64, 2, true);
+  const pos = cupGeo.attributes.position;
+  for (let i = 0; i < pos.count; i++) {
+    const x = pos.getX(i), z = pos.getZ(i), a = Math.atan2(z, x), k = 1 + 0.07 * Math.sin(a * 18);
+    pos.setX(i, x * k); pos.setZ(i, z * k);
+  }
+  cupGeo.computeVertexNormals();
+  cup.add(solid(cupGeo, M.foil, 0, 0.65, 0));
+  cup.add(solid(new THREE.CircleGeometry(1.9, 40).rotateX(-Math.PI / 2), M.foil, 0, 0.02, 0));
+  cup.position.set(px, plateTop + 0.01, pz);
+  chamber.add(cup);
+
+  // K-type probe clipped under the plate with an alligator clip.
+  const probe = new THREE.Group();
+  // Runs in from the left under the back half of the plate; clipped at the left edge near the back corner.
+  const rodY = plateBot - 0.45, rodZ = pz - padD / 2 + 2.4;
+  const tip = V(px + 1.5, rodY, rodZ), rear = V(edgeX - 0.4, rodY, rodZ);
+  probe.add(rod(tip, rear, 0.3, M.steel));
+  probe.add(solid(new THREE.CylinderGeometry(0.42, 0.42, 1.4, 16).rotateZ(Math.PI / 2), M.steel, rear.x - 0.7, rodY, rodZ));
+  probe.add(solid(new THREE.CylinderGeometry(0.6, 0.6, 0.5, 6).rotateZ(Math.PI / 2), M.steel, rear.x - 0.2, rodY, rodZ));
+  probe.add(tube([V(rear.x - 1.3, rodY, rodZ), V(rear.x - 2.2, rodY - 0.4, rodZ + 0.6),
+    V(holeX - 0.2, floorY + 0.9, holeZ - 0.3), V(holeX - 0.3, floorY - 1.0, holeZ - 0.2)], 0.24, M.braid));
+  // Clip grips the back edge near the back-left corner, body sticking out toward the back wall.
+  const backZ = pz - padD / 2, clipX = edgeX + 2.6, clipZ = backZ - 1.3;
+  probe.add(solid(new RoundedBoxGeometry(1.2, 1.0, 2.6, 2, 0.3), M.rubber, clipX, (plateTop + rodY) / 2, clipZ));
+  probe.add(solid(new THREE.BoxGeometry(1.0, 0.18, 2.8), M.steel, clipX, plateTop + 0.1, backZ + 1.3));
+  probe.add(solid(new THREE.BoxGeometry(1.0, 0.18, 2.8), M.steel, clipX, rodY - 0.38, backZ + 1.3));
+  chamber.add(probe);
+
+  // Base: four bed legs with round mounting plates screwed to the chamber floor.
+  const base = new THREE.Group();
+  const lx = W / 2 - 4.5, lz = D / 2 - 4.5;
+  for (const sx of [-1, 1]) for (const sz of [-1, 1]) {
+    const x = sx * lx, z = sz * lz;
+    base.add(solid(new THREE.CylinderGeometry(3.4, 3.4, 0.35, 40), M.mount, x, floorY - 0.18, z));
+    base.add(solid(new THREE.CylinderGeometry(1.9, 1.9, legH - 1.6, 32), M.black, x, 1.2 + (legH - 1.6) / 2, z));
+    base.add(solid(new THREE.CylinderGeometry(2.1, 2.3, 1.2, 32), M.rubber, x, 0.6, z));
+    for (let k = 0; k < 4; k++) {
+      const a = Math.PI / 4 + k * Math.PI / 2;
+      base.add(solid(new THREE.CylinderGeometry(0.38, 0.38, 0.22, 16), M.steel, x + Math.cos(a) * 2.5, floorY + 0.11, z + Math.sin(a) * 2.5));
+    }
+  }
+
+  // Controller box under the chamber: OLED in the middle, keypad to its right, power module at the back.
+  const ctrl = new THREE.Group();
+  const cy = floorY - 0.6 - ctrlH / 2, cf = ctrlD / 2;
+  ctrl.add(solid(new RoundedBoxGeometry(ctrlW, ctrlH, ctrlD, 3, 0.5), M.case, 0, cy, 0));
+  const ow = 6.2, oh = 3.1, ks = Math.min(5.4, ctrlH - 1);
+  ctrl.add(solid(new THREE.BoxGeometry(ow + 0.8, oh + 0.8, 0.12), M.rubber, 0, cy + 0.2, cf + 0.03));
+  const oled = new THREE.Mesh(new THREE.PlaneGeometry(ow, oh), M.oled);
+  oled.position.set(0, cy + 0.2, cf + 0.1);
+  ctrl.add(oled);
+  const keypad = solid(new THREE.BoxGeometry(ks, ks, 0.08), [M.alu, M.alu, M.alu, M.alu, M.keypad, M.alu],
+    ow / 2 + 1.1 + ks / 2, cy, cf + 0.05);
+  ctrl.add(keypad);
+  const power = new THREE.Group();
+  power.add(solid(new RoundedBoxGeometry(2.9, 4.6, 0.6, 2, 0.15), M.rubber, 0, 0, -0.3));
+  power.add(solid(new RoundedBoxGeometry(2.3, 1.6, 0.6, 2, 0.12), M.switchRed, 0, 1.25, -0.75));
+  power.add(solid(new THREE.BoxGeometry(2.0, 0.8, 0.12), M.mount, 0, -0.05, -0.64));
+  power.add(solid(new RoundedBoxGeometry(2.1, 1.2, 0.14, 2, 0.4), M.black, 0, -1.45, -0.62));
+  for (const sx of [-1, 1]) power.add(solid(new THREE.CylinderGeometry(0.32, 0.32, 0.1, 16).rotateX(Math.PI / 2), M.rubber, sx * 0.45, -1.45, -0.7));
+  power.position.set(ctrlW / 2 - 3.4, cy, -cf);
+  ctrl.add(power);
+
+  model.add(chamber, base, ctrl);
+  scene.add(model);
+  Object.assign(parts, { chamber, base, ctrl, door, cup, water, shell, lock, hang, grill, pad, probe, oled, keypad, power,
+    legs: base });
+
+  const L = (text, obj, x, y, z) => labels.push({ text, obj, p: V(x, y, z) });
+  L('Clear acrylic chamber', chamber, -W / 2, floorY + H * 0.72, D / 2 - r - 2);
+  L('Front door', door, W / 2 - 6, floorY + H - 3, front + 0.4);
+  L('Door gasket', door, -(dW / 2 - inset - gW / 2), floorY + H * 0.35, front - 0.12);
+  L('Door lock', door, lockX + podW / 2, lowPodY, front + 0.55 + podT);
+  L('Wire grill', grill, hx, gTop, hz);
+  L('Water tray', water, -trayW / 2, 1.8, trayD / 2);
+  L('Foil cup', cup, 2.3, 1.2, 0);
+  L('Heating pad', chamber, px + padW / 2, plateBot + plateT / 2, pz + padD / 4);
+  L('Wooden base', chamber, px + padW / 2, floorY + woodH / 2, pz - padD / 4);
+  L('Hanging rod', hang, W * 0.3, rodHangY + rodR, 0);
+  L('S-hook', hang, hookXs[0] - 0.75, rodHangY - 4.3, 0);
+  L('K-type probe', probe, rear.x - 1.2, rodY, rodZ);
+  L('Alligator clip', probe, clipX, (plateTop + rodY) / 2, clipZ - 1.3);
+  L('Heating pad wires', chamber, edgeX - 0.9, plateBot - 0.6, pz + 0.45);
+  L('Cable hole', chamber, holeX, floorY, holeZ + 1);
+  L('Leg mount', base, lx, floorY, lz + 3.4);
+  L('Leg', base, -lx - 1.9, legH * 0.45, lz);
+  L('Controller box', ctrl, -ctrlW / 2, cy - ctrlH / 2 + 1, cf);
+  L('OLED display', oled, -ow / 2, 0, 0);
+  L('Keypad', keypad, ks / 2, 0, 0.05);
+  L('Power switch and inlet', power, 1.45, 0, -0.6);
+
+  applyToggles();
+  document.getElementById('overall').textContent =
+    `Overall ${fmt(W)} × ${fmt(D + 2.2)} × ${fmt(topY + 1.5)} cm (W × D × H)`;
+}
+const fmt = v => (Math.round(v * 10) / 10).toString();
+
+// ---------- toggles ----------
+const $ = id => document.getElementById(id);
+let explode = 0, explodeTarget = 0;
+function applyToggles() {
+  parts.cup.visible = $('t-cup').checked;
+  parts.water.visible = $('t-water').checked;
+  explodeTarget = $('t-explode').checked ? 1 : 0;
+}
+['t-cup', 't-water', 't-explode', 't-labels'].forEach(id => $(id).addEventListener('change', applyToggles));
+
+// ---------- size inputs ----------
+const dims = $('dims');
+for (const [key, name] of FIELDS) {
+  const lab = document.createElement('label'); lab.htmlFor = 'd-' + key; lab.textContent = name;
+  const wrap = document.createElement('span'); wrap.className = 'in';
+  const inp = document.createElement('input');
+  Object.assign(inp, { id: 'd-' + key, type: 'number', min: '1', max: '120', step: '0.5', value: P[key] });
+  inp.addEventListener('change', () => {
+    const v = parseFloat(inp.value);
+    if (!(v >= 1 && v <= 120)) { inp.value = P[key]; return; }
+    P[key] = v; save(); build();
+  });
+  wrap.append(inp, 'cm');
+  dims.append(lab, wrap);
+}
+function save() { try { localStorage.setItem(STORE, JSON.stringify(P)); } catch (e) {} }
+$('reset').addEventListener('click', () => {
+  P = { ...DEF }; save();
+  for (const [key] of FIELDS) $('d-' + key).value = P[key];
+  build(); setView(currentView, true);
+});
+
+// ---------- views ----------
+const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
+let currentView = 'iso', camAnim = null;
+function viewPose(name) {
+  const h = P.legH + P.boxH, size = Math.max(P.boxW, P.boxD, h);
+  const dist = size * 2.55, t = V(0, h * 0.46, 0);
+  return { pos: V(...DIRS[name]).normalize().multiplyScalar(dist).add(t), target: t };
+}
+const DIRS = {
+  iso: [0.72, 0.42, 0.95], front: [0, 0.08, 1], side: [1, 0.08, 0], top: [0, 1, 0.001],
+  back: [-0.55, 0.3, -1], low: [0.6, -0.02, 1], left: [-1, 0.35, 0.45], backlow: [0.35, 0.12, -1],
+  frontlow: [0.25, 0.1, 1], isoleft: [-0.72, 0.5, 0.95], above: [0.25, 1, 0.55],
+};
+function setView(name, instant = false) {
+  currentView = name;
+  document.querySelectorAll('#views button').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.view === name)));
+  const to = viewPose(name);
+  if (instant || reduceMotion) { camera.position.copy(to.pos); controls.target.copy(to.target); controls.update(); camAnim = null; return; }
+  camAnim = { t0: performance.now(), fromPos: camera.position.clone(), fromT: controls.target.clone(), to };
+}
+$('views').addEventListener('click', e => { const b = e.target.closest('button'); if (b) setView(b.dataset.view); });
+
+// ---------- labels (drawn on a 2D canvas so pictures include them) ----------
+const tmp = new THREE.Vector3(), ray = new THREE.Raycaster(), rayDir = new THREE.Vector3();
+const shown = o => { for (; o; o = o.parent) if (!o.visible) return false; return true; };
+// true when a solid (not see-through) surface sits more than 1 cm in front of the label point
+function blocked(world) {
+  const dist = rayDir.copy(world).sub(camera.position).length();
+  ray.set(camera.position, rayDir.divideScalar(dist));
+  ray.far = Math.max(0, dist - 1);
+  return ray.intersectObject(model, true).some(({ object: m }) =>
+    m.isMesh && !(m.material.transparent && m.material.opacity < 0.9) && shown(m));
+}
+function drawLabels(ctx, w, h) {
+  if (!$('t-labels').checked) return;
+  const pts = [];
+  for (const l of labels) {
+    if (!shown(l.obj)) continue;
+    if (RENDER && RENDER.labels === 'focus' && !RENDER.focus.includes(LABEL_KEY[l.text])) continue;
+    tmp.copy(l.p); l.obj.localToWorld(tmp);
+    if (blocked(tmp)) continue;
+    tmp.project(camera);
+    if (tmp.z > 1) continue;
+    pts.push({ text: l.text, x: (tmp.x + 1) / 2 * w, y: (1 - tmp.y) / 2 * h });
+  }
+  const font = RENDER ? 17 : Math.max(11, Math.min(14, w / 60));
+  ctx.font = `600 ${font}px "IBM Plex Sans", system-ui, sans-serif`;
+  ctx.textBaseline = 'middle';
+  const rowH = font * 1.95, padX = font * 0.6, margin = 10;
+  for (const side of ['left', 'right']) {
+    const col = pts.filter(p => (side === 'left') === (p.x < w / 2)).sort((a, b) => a.y - b.y);
+    let y = -Infinity;
+    for (const p of col) { p.ly = Math.max(p.y, y + rowH); y = p.ly; }
+    const over = y - (h - margin - rowH / 2);
+    if (over > 0) for (const p of col) p.ly -= over;
+    for (let i = 1; i < col.length; i++) col[i].ly = Math.max(col[i].ly, col[i - 1].ly + rowH * 0.92);
+    for (const p of col) {
+      const tw = ctx.measureText(p.text).width, bw = tw + padX * 2, bh = font * 1.6;
+      const bx = side === 'left' ? margin : w - margin - bw;
+      const ex = side === 'left' ? bx + bw : bx;
+      ctx.strokeStyle = '#0b6e8a'; ctx.lineWidth = 1.2;
+      ctx.beginPath(); ctx.moveTo(ex, p.ly); ctx.lineTo(ex + (side === 'left' ? 10 : -10), p.ly); ctx.lineTo(p.x, p.y); ctx.stroke();
+      ctx.fillStyle = '#0b6e8a'; ctx.beginPath(); ctx.arc(p.x, p.y, 3, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = 'rgba(255,255,255,0.94)'; ctx.strokeStyle = '#b9c5cb';
+      roundRect(ctx, bx, p.ly - bh / 2, bw, bh, 5); ctx.fill(); ctx.stroke();
+      ctx.fillStyle = '#1b2226'; ctx.fillText(p.text, bx + padX, p.ly + 0.5);
+    }
+  }
+}
+
+// ---------- sizing and loop ----------
+let cssW = 0, cssH = 0;
+function resize() {
+  const rc = stage.getBoundingClientRect();
+  cssW = Math.max(1, Math.round(rc.width)); cssH = Math.max(1, Math.round(rc.height));
+  renderer.setSize(cssW, cssH, false);
+  camera.aspect = cssW / cssH; camera.updateProjectionMatrix();
+  const dpr = Math.min(devicePixelRatio, 2);
+  overlay.width = cssW * dpr; overlay.height = cssH * dpr;
+  octx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+new ResizeObserver(resize).observe(stage);
+
+function placeExploded() {
+  parts.chamber.position.y = explode * 14;
+  parts.door.position.z = explode * 12;
+  parts.ctrl.position.set(0, -explode, explode * 22);
+}
+function frame(now) {
+  if (camAnim) {
+    const k = Math.min(1, (now - camAnim.t0) / 650), e = 1 - Math.pow(1 - k, 3);
+    camera.position.lerpVectors(camAnim.fromPos, camAnim.to.pos, e);
+    controls.target.lerpVectors(camAnim.fromT, camAnim.to.target, e);
+    if (k === 1) camAnim = null;
+  }
+  explode += (explodeTarget - explode) * (reduceMotion ? 1 : 0.12);
+  if (parts.chamber) placeExploded();
+  controls.update();
+  renderer.render(scene, camera);
+  octx.clearRect(0, 0, cssW, cssH);
+  drawLabels(octx, cssW, cssH);
+  requestAnimationFrame(frame);
+}
+
+// ---------- picture for the manual ----------
+$('snap').addEventListener('click', () => {
+  explode = explodeTarget; placeExploded();
+  renderer.setPixelRatio(3); renderer.setSize(cssW, cssH, false);
+  renderer.setClearColor(0xffffff, 1);
+  renderer.render(scene, camera);
+  const out = document.createElement('canvas');
+  out.width = glCanvas.width; out.height = glCanvas.height;
+  const x = out.getContext('2d');
+  x.drawImage(glCanvas, 0, 0);
+  x.setTransform(out.width / cssW, 0, 0, out.height / cssH, 0, 0);
+  drawLabels(x, cssW, cssH);
+  $('shot-img').src = out.toDataURL('image/png');
+  $('shot').hidden = false;
+  renderer.setClearColor(STAGE_BG, 1);
+  renderer.setPixelRatio(Math.min(devicePixelRatio, 2)); resize();
+  $('shot').scrollIntoView({ behavior: reduceMotion ? 'auto' : 'smooth', block: 'nearest' });
+});
+
+// ---------- render mode for manual figures: #render;view=iso;focus=pad,cup;labels=focus|all|none;explode=1;fit=1;zoom=1.6 ----------
+const LABEL_KEY = {
+  'Clear acrylic chamber': 'shell', 'Front door': 'door', 'Door gasket': 'door', 'Door lock': 'lock',
+  'Wire grill': 'grill', 'Water tray': 'water', 'Foil cup': 'cup', 'Heating pad': 'pad', 'Wooden base': 'pad',
+  'Heating pad wires': 'pad', 'Cable hole': 'pad', 'Hanging rod': 'hang', 'S-hook': 'hang', 'K-type probe': 'probe',
+  'Alligator clip': 'probe', 'Leg mount': 'legs', 'Leg': 'legs', 'Controller box': 'ctrl', 'OLED display': 'oled',
+  'Keypad': 'keypad', 'Power switch and inlet': 'power',
+};
+const RENDER = (() => {
+  if (!location.hash.startsWith('#render')) return null;
+  const o = { view: 'iso', labels: 'none', focus: [] };
+  location.hash.slice(1).split(';').slice(1).forEach(kv => { const [k, v] = kv.split('='); o[k] = v ?? '1'; });
+  if (typeof o.focus === 'string') o.focus = o.focus.split(',');
+  return o;
+})();
+build();
+resize();
+setView('iso', true);
+if (RENDER) {
+  document.body.classList.add('render');
+  renderer.setClearColor(0xffffff, 1);
+  $('t-labels').checked = RENDER.labels !== 'none';
+  $('t-explode').checked = RENDER.explode === '1';
+  if (RENDER.cup === '0') $('t-cup').checked = false;
+  if (RENDER.water === '0') $('t-water').checked = false;
+  applyToggles();
+  explode = explodeTarget; placeExploded();
+  resize();
+  const focus = RENDER.focus.map(k => parts[k]).filter(Boolean);
+  if (focus.length) {
+    const ghost = new THREE.MeshStandardMaterial({ color: 0xc4ccd1, transparent: true, opacity: 0.09, depthWrite: false });
+    const ghostLine = new THREE.LineBasicMaterial({ color: 0xc9d2d6 });
+    model.traverse(n => {
+      if (!(n.isMesh || n.isLine)) return;
+      for (let p = n; p; p = p.parent) if (focus.includes(p)) return;
+      n.material = n.isMesh ? ghost : ghostLine;
+      n.castShadow = false;
+    });
+  }
+  setView(RENDER.view, true);
+  if (RENDER.fit === '1' && focus.length) {
+    model.updateMatrixWorld(true);
+    const box = new THREE.Box3();
+    focus.forEach(o => box.expandByObject(o));
+    const c = box.getCenter(new THREE.Vector3()), size = box.getSize(new THREE.Vector3()).length();
+    const dist = size / 2 / Math.tan(THREE.MathUtils.degToRad(camera.fov / 2)) * parseFloat(RENDER.zoom || '1.6');
+    camera.position.copy(V(...DIRS[RENDER.view]).normalize().multiplyScalar(dist).add(c));
+    controls.target.copy(c);
+    controls.update();
+  } else if (RENDER.zoom) {
+    camera.position.sub(controls.target).multiplyScalar(parseFloat(RENDER.zoom)).add(controls.target);
+    controls.update();
+  }
+}
+requestAnimationFrame(frame);
+</script>
