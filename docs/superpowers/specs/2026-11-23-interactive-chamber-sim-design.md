@@ -17,8 +17,16 @@ firmware 1.0.13 does, so practice on the simulator carries over to the real cham
   lock PUSH buttons, door, water tray, foil cup, cyanoacrylate bottle, S-hook specimen,
   power switch, the five keypad keys.
 - The OLED on the model is a live screen showing the same screens as the firmware.
-- The heating pad visibly warms (colour from grey to dull red with temperature);
-  fumes appear inside the chamber while fuming; steam rises from the water tray.
+- The heating plate glows red as it heats (grey → dull red → bright red with temperature,
+  plus a faint heat shimmer).
+- Fumes: white smoke/fog rises from the cup once the cyanoacrylate is on the hot plate and
+  slowly fills the chamber; it thins out when the cycle ends and pours out if the door is opened.
+- Hot water evaporates: steam rises from the water tray, stronger while it is hot, fading
+  as it cools.
+- Test objects (requested): a glass bottle and a drinking glass beside the chamber. The user
+  picks one up and places it in the chamber (stands on the grill or hangs from an S-hook).
+  During fuming, white fingerprint ridges slowly appear on it; when it is taken out after
+  the cycle the developed prints stay visible. Too short a cycle = faint prints.
 - Beeps match the firmware (key click, two boot beeps, Step 4 double beep repeating,
   done long beep repeating until a key).
 - User-controlled speed: 1×, 10×, 60×, so the warm-up does not drag.
@@ -76,7 +84,7 @@ firmware 1.0.13 does, so practice on the simulator carries over to the real cham
 | Power switch | on/off; boot beeps + splash |
 | Lock PUSH button (either piece) | lock releases; second click re-latches |
 | Door (lock released) | door opens; click again closes; lock latches when closed (user to confirm how the door opens, see open questions) |
-| S-hook | hang / remove a specimen card |
+| Bottle / glass (beside the chamber) | pick up, then click the grill or an S-hook to place it; click again to take it out |
 | Water tray | put in with hot water (steam) / take out |
 | Foil cup | place on / remove from the plate |
 | Cyanoacrylate bottle (beside the chamber) | add drops to the cup (door must be open) |
