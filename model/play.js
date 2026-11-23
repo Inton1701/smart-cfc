@@ -51,25 +51,38 @@ export function startPlay({ THREE, scene, camera, stage, parts, M, solid, flyTo,
     g.addColorStop(0, 'rgba(255,255,255,1)'); g.addColorStop(1, 'rgba(255,255,255,0)');
     c.fillStyle = g; c.fillRect(0, 0, w, w);
   });
-  // Two latent prints, white ridges on clear: the decal on each test object.
-  const printTex = canvasTex(256, 128, (c) => {
-
-    for (const [cx, cy, rot] of [[78, 64, -0.3], [176, 60, 0.25]]) {
-      c.save(); c.translate(cx, cy); c.rotate(rot);
-      for (const [col, lw] of [['rgba(40,46,50,0.55)', 3.6], ['rgba(255,255,255,0.97)', 1.8]]) for (let k = 2; k < 15; k++) {
-        c.strokeStyle = col; c.lineWidth = lw;
-        c.beginPath();
-        for (let a = 0; a <= Math.PI * 2 + 0.01; a += 0.08) {
-          const wob = 1 + 0.06 * Math.sin(a * 5 + k), rx = k * 2.3 * wob, ry = k * 3.2 * wob;
-          const x = Math.cos(a) * rx, y = Math.sin(a) * ry - (a > Math.PI ? k * 0.6 : 0);
-          if (Math.sin(a * 9 + k * 1.7) > 0.86) { c.stroke(); c.beginPath(); c.moveTo(x, y); continue; }
-          a === 0 ? c.moveTo(x, y) : c.lineTo(x, y);
-        }
-        c.stroke();
+  // Two latent prints as short ridge segments. Each segment has the exposure at which
+  // the white polymer shows on it, in patches, so a print builds up the way real
+  // cyanoacrylate development does instead of fading in all at once.
+  const PRINT_SEGS = (() => {
+    const segs = []; let seed = 7, th = 0;
+    const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+    for (const [cx, cy, rot] of [[78, 64, -0.3], [176, 60, 0.25]]) for (let k = 2; k < 15; k++) {
+      let prev = null, run = 0;
+      for (let a = 0; a <= Math.PI * 2 + 0.01; a += 0.08) {
+        const wob = 1 + 0.06 * Math.sin(a * 5 + k), lx = Math.cos(a) * k * 2.3 * wob, ly = Math.sin(a) * k * 3.2 * wob - (a > Math.PI ? k * 0.6 : 0);
+        const x = cx + lx * Math.cos(rot) - ly * Math.sin(rot), y = cy + lx * Math.sin(rot) + ly * Math.cos(rot);
+        if (run-- <= 0) { th = 0.06 + 0.8 * rnd() * (0.6 + 0.4 * k / 15); run = 3 + Math.floor(rnd() * 6); }   // patch
+        const gap = Math.sin(a * 9 + k * 1.7) > 0.86;
+        if (prev && !gap) segs.push([prev[0], prev[1], x, y, th]);
+        prev = gap ? null : [x, y];
       }
-      c.restore();
     }
-  });
+    return segs;
+  })();
+  function drawPrints(c, e) {
+    c.clearRect(0, 0, 256, 128);
+    if (e <= 0.02) return;
+    const thick = Math.max(0, e - 1.1) * 3;                       // over-fumed: ridges fill in
+    for (const [col, lw] of [['40,46,50', 3.4 + thick], ['255,255,255', 1.7 + thick]]) {
+      c.lineWidth = lw; c.lineCap = 'round';
+      for (const [x1, y1, x2, y2, th] of PRINT_SEGS) {
+        if (e <= th) continue;
+        c.strokeStyle = `rgba(${col},${Math.min(1, (e - th) * 5) * (col[0] === '4' ? 0.5 : 0.97)})`;
+        c.beginPath(); c.moveTo(x1, y1); c.lineTo(x2, y2); c.stroke();
+      }
+    }
+  }
   const oledCanvas = document.createElement('canvas'); oledCanvas.width = 512; oledCanvas.height = 256;
   const oledTex = new THREE.CanvasTexture(oledCanvas);
   oledTex.colorSpace = THREE.SRGBColorSpace; oledTex.magFilter = THREE.NearestFilter;
@@ -96,7 +109,7 @@ export function startPlay({ THREE, scene, camera, stage, parts, M, solid, flyTo,
       fx.add(s); return s;
     });
   }
-  const steam = pool(reduceMotion ? 10 : 36, 0xcfd9df, 1.6), fumes = pool(reduceMotion ? 16 : 70, 0xc4c8c2, 2.6);
+  const steam = pool(reduceMotion ? 10 : 36, 0xcfd9df, 1.6), fumes = pool(reduceMotion ? 20 : 120, 0xc4c8c2, 3.0);
   function emit(list, at, v, life) {
     const s = list.find(p => !p.visible); if (!s) return;
     s.position.copy(at); s.userData.v.copy(v); s.userData.life = 0; s.userData.max = life; s.visible = true;
@@ -118,11 +131,11 @@ export function startPlay({ THREE, scene, camera, stage, parts, M, solid, flyTo,
     const bottle = new THREE.Group();
     const prof = [[0, 0], [2.3, 0], [2.4, 0.4], [2.4, 8.2], [1.9, 9.4], [0.95, 10.4], [0.9, 12.2], [1.05, 12.4], [1.05, 12.8]].map(([r, y]) => new THREE.Vector2(r, y));
     bottle.add(solid(new THREE.LatheGeometry(prof, 40), bottleMat));
-    bottle.add(printDecal(new THREE.CylinderGeometry(2.43, 2.43, 4.2, 32, 1, true, -0.55, 1.1), 4.6));
+    bottle.add(printDecal(new THREE.CylinderGeometry(2.43, 2.43, 4.6, 32, 1, true, -0.75, 1.5), 4.6));
     const glass = new THREE.Group();
     glass.add(solid(new THREE.CylinderGeometry(2.3, 1.9, 8, 40, 1, true), glassMat, 0, 4, 0));
     glass.add(solid(new THREE.CircleGeometry(1.9, 40).rotateX(-Math.PI / 2), glassMat, 0, 0.15, 0));
-    glass.add(printDecal(new THREE.CylinderGeometry(2.16, 2.07, 3.6, 32, 1, true, -0.55, 1.1), 4.4));
+    glass.add(printDecal(new THREE.CylinderGeometry(2.16, 2.07, 4.0, 32, 1, true, -0.75, 1.5), 4.4));
     const cyano = new THREE.Group();
     cyano.add(solid(new THREE.CylinderGeometry(1.1, 1.2, 4.2, 24), cyanoBody, 0, 2.1, 0));
     cyano.add(solid(new THREE.CylinderGeometry(0.5, 0.9, 1.0, 20), cyanoBody, 0, 4.7, 0));
@@ -137,8 +150,10 @@ export function startPlay({ THREE, scene, camera, stage, parts, M, solid, flyTo,
     place(true);
   }
   function printDecal(geo, y) {
-    const m = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ map: printTex, transparent: true, opacity: 0, depthWrite: false }));
-    m.position.y = y; m.userData.print = true; return m;
+    const c = document.createElement('canvas'); c.width = 256; c.height = 128;
+    const map = new THREE.CanvasTexture(c); map.colorSpace = THREE.SRGBColorSpace;
+    const m = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ map, transparent: true, depthWrite: false }));
+    m.position.y = y; m.userData = { print: true, ctx: c.getContext('2d'), step: -1 }; return m;
   }
 
   // Bench (outside, on the table) and inside positions, chamber coordinates.
@@ -325,8 +340,8 @@ export function startPlay({ THREE, scene, camera, stage, parts, M, solid, flyTo,
     fogMat.opacity = 0.42 * world.fume;
     liquid.visible = world.cyano > 0.05; liquid.scale.setScalar(0.5 + Math.min(1, world.cyano / 5) * 0.6);
     for (const k of ['bottle', 'glass']) {
-      const decal = items[k].children.find(c => c.userData.print);
-      decal.material.opacity = Math.min(1, world.objects[k].exposure) * 0.9;
+      const d = items[k].children.find(c => c.userData.print).userData, step = Math.round(world.objects[k].exposure * 60);
+      if (step !== d.step) { d.step = step; drawPrints(d.ctx, world.objects[k].exposure); items[k].children.find(c => c.userData.print).material.map.needsUpdate = true; }
     }
     updateParticles(dt, s, evap);
 
@@ -343,9 +358,9 @@ export function startPlay({ THREE, scene, camera, stage, parts, M, solid, flyTo,
       parts.water.getWorldPosition(tmp).add(V((Math.random() - 0.5) * 4, 1.9, (Math.random() - 0.5) * 4));
       emit(steam, tmp, V((Math.random() - 0.5) * 0.4, 1.8 + Math.random(), (Math.random() - 0.5) * 0.4), 2.2);
     }
-    if (Math.random() < Math.min(1, evap * 400) * secs * (reduceMotion ? 6 : 30)) {
+    if (Math.random() < Math.min(1, evap * 400) * secs * (reduceMotion ? 8 : 55)) {
       parts.cup.getWorldPosition(tmp).add(V((Math.random() - 0.5) * 2, 1.2, (Math.random() - 0.5) * 2));
-      emit(fumes, tmp, V((Math.random() - 0.5) * 0.8, 1.2 + Math.random() * 0.8, (Math.random() - 0.5) * 0.8), 6);
+      emit(fumes, tmp, V((Math.random() - 0.5) * 0.8, 1.6 + Math.random() * 1.2, (Math.random() - 0.5) * 0.8), 9);
     }
     const top = g.topY - 1.5, frontZ = g.front;
     for (const list of [steam, fumes]) for (const p of list) {
@@ -354,6 +369,8 @@ export function startPlay({ THREE, scene, camera, stage, parts, M, solid, flyTo,
       if (u.life >= u.max) { p.visible = false; continue; }
       p.position.addScaledVector(u.v, secs);
       if (list === fumes) {
+        const sw = p.id * 0.7;                                       // swirl: each puff curls its own way
+        u.v.x += Math.sin(u.life * 1.6 + sw) * 1.1 * secs; u.v.z += Math.cos(u.life * 1.3 + sw) * 1.1 * secs;
         if (world.doorOpen) u.v.z += 2.5 * secs;                      // pours out the front
         else if (p.position.z > frontZ - 1) u.v.z = -Math.abs(u.v.z);
         if (p.position.y > top && !world.doorOpen) { p.position.y = top; u.v.y = 0; u.v.x += (Math.random() - 0.5) * secs * 4; }
@@ -380,6 +397,11 @@ export function startPlay({ THREE, scene, camera, stage, parts, M, solid, flyTo,
     frame,
     attach,                                   // after a size change rebuilt the model
     stop() { M.oled.map = staticOled; scene.remove(fx); },
+    // Fly the camera close to the two test objects to watch the prints develop.
+    closeUp() {
+      const t = items.bottle.getWorldPosition(V(0, 0, 0)).add(items.glass.getWorldPosition(V(0, 0, 0))).multiplyScalar(0.5).add(V(0, 5, 0));
+      flyTo(t.clone().add(V(0, 2, 20)), t);
+    },
     // For scripted checks: click a part by kind, press/release a key, read state.
     act(kind) { (kind === 'bottle' || kind === 'glass') ? ACT.object(kind) : ACT[kind](); },
     key(name, isDown) { panel.key(name, isDown, performance.now()); },

@@ -109,7 +109,10 @@ body.render { padding: 0; background: #fff; }
           </select>
         </label>
         <div class="readout" id="sim-readout"></div>
-        <button id="sim-reset">Restart</button>
+        <div class="speed" style="grid-template-columns: 1fr 1fr">
+          <button id="sim-closeup">Prints close-up</button>
+          <button id="sim-reset">Restart</button>
+        </div>
       </div>
 
       <div class="group">
@@ -803,6 +806,7 @@ if (!RENDER) {
     next: $('sim-next'), coach: $('sim-coach'), tip: $('sim-tip'), readout: $('sim-readout'),
     fault: $('sim-fault'), reset: $('sim-reset'), speed: [...document.querySelectorAll('[data-speed]')] } });
   afterBuild = () => play.attach();
+  $('sim-closeup').addEventListener('click', () => play.closeUp());
   window.cfcPlay = play;   // handle for scripted checks
   for (const id of ['t-cup', 't-water']) $(id).closest('label').hidden = true;   // the simulator moves them
 }
