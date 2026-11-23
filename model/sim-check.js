@@ -193,6 +193,35 @@ test('constants match firmware 1.0.13', () => {
   assert.deepEqual([C.PREHEAT_TIMEOUT_MS, C.READY_TIMEOUT_MS], [15 * MIN, 10 * MIN]);
 });
 
+// ---- OLED screens ----
+const { oledBuffer, oledText } = await import('./oled.js');
+const lit = b => b.reduce((n, v) => n + v, 0);
+test('oled: power off is black, every state draws its own screen', () => {
+  const off = createSim();
+  assert.equal(lit(oledBuffer(off.snap(), 0)), 0);
+  const s = createSim(); s.power(true); s.advance(250, 1);
+  assert.match(oledText(s.snap(), 0).join('|'), /CFC/);                       // splash
+  run(s, 2500, 1);
+  assert.match(oledText(s.snap(), 1).join('|'), /SETUP.*130.*20/);
+  hold(s); assert.match(oledText(s.snap(), 0).join('|'), /STEP 1 OF 4.*hot water/);
+  tap(s);  assert.match(oledText(s.snap(), 0).join('|'), /STEP 2 OF 4.*NO CYANOACRYLATE YET/);
+  tap(s);  assert.match(oledText(s.snap(), 0).join('|'), /set 130°C.*HEAT.*warm/);
+  assert.match(oledText(s.snap(), 6).join('|'), /DON'T ADD\|CYANOACRYLATE YET/);
+  assert.ok(until(s, x => x.state === 'Ready', 15 * MIN));
+  assert.match(oledText(s.snap(), 0).join('|'), /STEP 4  130°C READY.*any key: start/);
+  tap(s);  assert.match(oledText(s.snap(), 0).join('|'), /RUN.*20:00|RUN.*19:5\d.*left/);
+  assert.ok(until(s, x => x.state === 'Complete', 21 * MIN));
+  assert.match(oledText(s.snap(), 0).join('|'), /DONE.*PLATE HOT!.*no touch/);
+  assert.ok(lit(oledBuffer(s.snap(), 0)) > 100);
+});
+test('oled: fault and overtemp screens', () => {
+  const s = booted(); s.fault('probeUnplugged'); run(s, 1000, 1);
+  assert.match(oledText(s.snap(), 0).join('|'), /FAULT.*PROBE OPEN.*SEL: clear/);
+  const t = ready(); tap(t); t.fault('heaterStuck');
+  assert.ok(until(t, x => x.state === 'SafetyTrip', 20 * MIN));
+  assert.match(oledText(t.snap(), 0).join('|'), /OVERTEMP > 200°C.*cool <150°C, SEL/);
+});
+
 // ---- runner ----
 let failed = 0;
 for (const [name, fn] of tests) {
