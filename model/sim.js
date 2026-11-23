@@ -197,6 +197,8 @@ export function createSim(opts = {}) {
         state: st, targetC: k?.targetC ?? saved.targetC, durationMin: k?.durationMin ?? saved.durationMin,
         field: k?.field ?? 'Target', tempC: k?.tempC ?? probeC, tempValid: on && !!k?.tempValid,
         padC, duty: on && k ? k.duty : 0, heaterOn: heaterW() > 0,
+        // What the controller commands (firmware heater.isOn()): the OLED flame. A stuck SSR heats with this off.
+        heaterCmd: controlling() && HEATING.has(k.state) && k.duty > 0,
         remainingMs: k?.remainingMs ?? 0, preheatElapsedMs: k?.preheatElapsedMs ?? 0,
         preheatStartC: k?.preheatStartC ?? amb, fault: k?.fault ? FAULT_TEXT[k.fault] : '',
         saved: savedLeft > 0, progressPct: pct, simMs,
@@ -218,6 +220,8 @@ export function createPanel() {
       else if (!down && b.down) { b.down = false; if (!b.holdFired && t - b.pressedAt < C.BTN_LONGPRESS_MS) b.tap = true; }
     },
     isDown: name => keys[name].down,
+    // Touch taken away by the OS: key up with no tap, hold or step.
+    cancel(name) { Object.assign(keys[name], { down: false, press: false, step: false, tap: false, hold: false }); },
     poll(t) {
       let click = false;
       for (const b of Object.values(keys)) {
@@ -272,6 +276,8 @@ export function hints(world, snap) {
   if (!world.cup && after(['Preheat', 'Ready', 'Running'])) out.push('No cup on the heating plate (STEP 2)');
   if (s === 'Running' && world.drops === 0) out.push('No cyanoacrylate in the cup: nothing will develop');
   if (s === 'Running' && world.doorOpen) out.push('Close the door: fumes are escaping');
+  if (s === 'Preheat' && world.doorOpen) out.push('Close and lock the door while the plate heats');
+  if (after(['Preheat', 'Running']) && !world.doorOpen && !world.locked) out.push('Door not locked: press PUSH to lock it');
   if (s === 'Running' && world.objectsInside === 0) out.push('No test object in the chamber');
   if (world.touchedHot) out.push('PLATE HOT: let it cool before touching');
   return out;
@@ -293,7 +299,10 @@ export function nextStep(world, snap) {
     case 'StepCup':
       if (!world.cup) return open ? 'Put the empty foil cup on the heating plate, then press any key' : toOpen;
       return 'Press any key to start heating';
-    case 'Preheat': return "Plate heating: don't add cyanoacrylate yet";
+    case 'Preheat':
+      if (open) return 'Close the door, then lock it (press PUSH)';
+      if (!world.locked) return 'Lock the door (press PUSH)';
+      return "Plate heating: don't add cyanoacrylate yet";
     case 'Ready':
       if (world.drops === 0) return open ? 'Add cyanoacrylate to the cup (click the bottle)' : toOpen;
       if (open) return 'Close the door';
@@ -302,7 +311,111 @@ export function nextStep(world, snap) {
     case 'Running': return 'Fuming: keep the door closed';
     case 'Complete': return 'Press any key, then take the objects out somewhere ventilated';
     case 'Fault': return 'Fix the fault, then press SEL';
-    case 'SafetyTrip': return 'Turn off the power and let it cool below 150 °C, then press SEL';
+    case 'SafetyTrip': return 'Turn off the power: the heater may be stuck on. Let it cool below 150 °C before using it again';
   }
   return '';
+}
+
+// The whole procedure (manual chapter 6), for the checklist.
+export const STEPS = [
+  'Turn on the power',
+  'Unlock and open the door',
+  'Put test objects on the grill',
+  'Set temperature and time, hold SEL',
+  'Step 1: hot water in, press a key',
+  'Step 2: empty cup on the plate, press a key',
+  'Step 3: close and lock the door, wait for heating',
+  'Step 4: open the door, add 3 to 5 drops',
+  'Close and lock the door, press a key',
+  'Fuming: wait for DONE',
+  'Press a key, let the plate cool',
+  'Take the objects out in a ventilated area',
+];
+
+// Index into STEPS of what the user is on now; STEPS.length when all done, -1 on a fault.
+// world.cycleDone is set by the page once a cycle has reached DONE.
+export function currentStep(world, snap) {
+  const s = snap.on ? snap.state : 'Off';
+  if (s === 'Fault' || s === 'SafetyTrip') return -1;
+  if (world.cycleDone && s !== 'StepWater') {
+    if (s === 'Complete') return 10;
+    return world.objectsInside > 0 ? 11 : STEPS.length;
+  }
+  switch (s) {
+    case 'Off': return 0;
+    case 'Idle': return world.objectsInside > 0 ? 3 : world.doorOpen ? 2 : 1;
+    case 'StepWater': return 4;
+    case 'StepCup': return 5;
+    case 'Preheat': return 6;
+    case 'Ready': return world.drops === 0 ? 7 : 8;
+    case 'Running': return 9;
+    case 'Complete': return 10;
+  }
+  return 0;
+}
+
+// Warning to show before an action that is wrong at this point, or null when it is fine.
+// kind: the part clicked ('cyano', 'door', 'push', 'power', 'water', 'cup').
+export function checkAction(kind, world, snap) {
+  const s = snap.on ? snap.state : 'Off', heating = ['Preheat', 'Ready', 'Running'].includes(s);
+  switch (kind) {
+    case 'cyano':
+      if (s === 'Ready' || s === 'Running') return null;
+      if (s === 'Preheat') return { title: 'Plate still heating',
+        text: 'Cyanoacrylate added now boils off while the plate warms up, before the fuming timer starts. Most of it is wasted and the prints come out weak. Wait for STEP 4 READY.' };
+      return { title: 'Plate is cold',
+        text: 'Cold cyanoacrylate does not fume. It will boil off later during warm-up, before the fuming timer starts, and the prints come out weak. Add it only at STEP 4 READY.' };
+    case 'door':
+      if (!world.doorOpen && s === 'Running') return { title: 'Fuming in progress',
+        text: 'Opening the door now lets the fumes out into the room and the prints develop unevenly. Wait for DONE.' };
+      return null;
+    case 'push':
+      if (world.locked && (s === 'Preheat' || s === 'Running')) return { title: 'Keep the door locked',
+        text: s === 'Running' ? 'The chamber is full of cyanoacrylate fumes. Keep the door locked until DONE.'
+                              : 'Keep the chamber locked while the plate heats. Unlock it only at STEP 4 READY to add the cyanoacrylate.' };
+      return null;
+    case 'power':
+      if (heating) return { title: 'Cycle running',
+        text: 'Turning off now stops the heater in the middle of the cycle. Use SEL to stop a cycle properly.' };
+      return null;
+    case 'water':
+      if (world.water && heating) return { title: 'Water needed',
+        text: 'The hot water keeps the air humid. Without it the prints develop weakly.' };
+      return null;
+    case 'cup':
+      if (world.cup && heating) return { title: 'Cup needed',
+        text: 'The cyanoacrylate goes in this cup on the hot plate. Leave it there until the cycle is done.' };
+      return null;
+  }
+  return null;
+}
+
+// Warning before a key press moves the controller on to the next stage, or null.
+// ev: ButtonEvents from the keypad. SEL hold during a cycle cancels and is always allowed.
+export function checkKey(ev, world, snap) {
+  const s = snap.on ? snap.state : 'Off';
+  if (s === 'Idle' && ev.selHold && world.objectsInside === 0) return { title: 'No test object',
+    text: 'There is nothing in the chamber to develop. Open the door and put the bottle or glass on the grill first.' };
+  if (!ev.anyTap) return null;
+  if (s === 'StepWater' && !world.water) return { title: 'No hot water',
+    text: 'Step 1 is the bowl of hot water: it keeps the air humid so the prints develop. Put the water tray in first.' };
+  if (s === 'StepCup' && !world.cup) return { title: 'No cup on the plate',
+    text: 'Step 2 is the empty foil cup on the heating plate. Without it there is nowhere to put the cyanoacrylate.' };
+  if (s === 'Ready') {
+    if (world.drops === 0) return { title: 'No cyanoacrylate yet',
+      text: 'The fuming timer would run with nothing in the cup, so nothing develops. Open the door and add 3 to 5 drops first.' };
+    if (world.doorOpen) return { title: 'Door open',
+      text: 'Fuming with the door open lets the fumes into the room. Close and lock the door first.' };
+    if (!world.locked) return { title: 'Door not locked',
+      text: 'The door is closed but not locked. Press PUSH to lock it before fuming starts.' };
+  }
+  return null;
+}
+
+// Warning right after the door is closed but left unlocked while it should be locked, or null.
+export function afterDoorClosed(world, snap) {
+  const s = snap.on ? snap.state : 'Off';
+  if (world.locked || !['Preheat', 'Ready', 'Running'].includes(s)) return null;
+  return { title: 'Door not locked',
+    text: 'The door is closed but the lock is open. Lock it so the chamber stays sealed while it heats and fumes.' };
 }

@@ -2,7 +2,7 @@
 // simulated controller (sim.js) and the physical setup (door, water, cup,
 // cyanoacrylate, test objects), with plate glow, steam, fumes, developing prints
 // and beeps. The page calls startPlay() once and play.frame(dtMs) every frame.
-import { createSim, createPanel, createBeeper, hints, nextStep } from './sim.js';
+import { createSim, createPanel, createBeeper, hints, nextStep, STEPS, currentStep, checkAction, checkKey, afterDoorClosed } from './sim.js';
 import { drawOled } from './oled.js';
 
 const NAMES = {
@@ -11,7 +11,7 @@ const NAMES = {
   inc: 'INC', dec: 'DEC', next: 'NEXT', prev: 'BEFORE', sel: 'SEL',
 };
 
-export function startPlay({ THREE, scene, camera, stage, parts, M, solid, flyTo, dom }) {
+export function startPlay({ THREE, scene, camera, stage, parts, M, solid, flyTo, setView, dom }) {
   const V = (x, y, z) => new THREE.Vector3(x, y, z);
   const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
 
@@ -22,7 +22,7 @@ export function startPlay({ THREE, scene, camera, stage, parts, M, solid, flyTo,
     sim.fault(dom.fault.value || null);
     world = {
       doorOpen: false, locked: true, doorT: 0, water: false, cup: false, drops: 0, cyano: 0,
-      waterC: 80, fume: 0, touchedHot: false, touchedUntil: 0,
+      waterC: 80, fume: 0, touchedHot: false, touchedUntil: 0, cycleDone: false,
       objects: { bottle: { inside: false, exposure: 0 }, glass: { inside: false, exposure: 0 } },
     };
   }
@@ -86,7 +86,6 @@ export function startPlay({ THREE, scene, camera, stage, parts, M, solid, flyTo,
   const oledCanvas = document.createElement('canvas'); oledCanvas.width = 512; oledCanvas.height = 256;
   const oledTex = new THREE.CanvasTexture(oledCanvas);
   oledTex.colorSpace = THREE.SRGBColorSpace; oledTex.magFilter = THREE.NearestFilter;
-  const staticOled = M.oled.map;
   M.oled.map = oledTex;
 
   // ---------- materials ----------
@@ -121,10 +120,13 @@ export function startPlay({ THREE, scene, camera, stage, parts, M, solid, flyTo,
     g = parts.geom;
     const { chamber, lock, roofPod, btnTop, plate } = parts;
     chamber.add(roofPod, btnTop);                  // roof half of the lock stays when the door comes off
+    plateMat?.dispose();                                 // size change: free the previous build's materials
+    for (const it of Object.values(items ?? {})) for (const c of it.children) if (c.userData.print) { c.material.map.dispose(); c.material.dispose(); }
     plateMat = M.alu.clone(); plate.material = plateMat;
     fog = new THREE.Mesh(new THREE.BoxGeometry(g.W - 1, g.H - 1, g.D - 1), fogMat);
     fog.position.set(0, g.floorY + g.H / 2, 0); fog.renderOrder = 2; chamber.add(fog);
-    glow = new THREE.Sprite(glowMat); glow.scale.set(g.padW * 1.8, g.padD * 1.2, 1);
+    glow = new THREE.Sprite(glowMat); glow.raycast = () => {};   // light, not a thing to click
+    glow.scale.set(g.padW * 1.8, g.padD * 1.2, 1);
     glow.position.set(g.px, g.plateTop + 0.6, g.pz); chamber.add(glow);
     liquid = solid(new THREE.CylinderGeometry(1.2, 1.2, 0.08, 24), liquidMat, 0, 0.1, 0); parts.cup.add(liquid);
 
@@ -192,7 +194,7 @@ export function startPlay({ THREE, scene, camera, stage, parts, M, solid, flyTo,
     door() {
       if (!world.doorOpen && world.locked) return say('Door locked: press PUSH first');
       world.doorOpen = !world.doorOpen;
-      if (world.doorOpen && sim.snap().state === 'Running') say('Fumes escaping: close the door');
+      if (world.doorOpen) world.locked = false;
     },
     water() {
       if (!needOpen()) return;
@@ -223,8 +225,55 @@ export function startPlay({ THREE, scene, camera, stage, parts, M, solid, flyTo,
     },
   };
 
+  // ---------- warnings ----------
+  // A popup that pauses the simulator. Buttons: [label, fn|null]; the first is the default.
+  let dialogOpen = false;
+  function ask(w, first, second) {
+    dialogOpen = true;
+    dom.dlgTitle.textContent = w.title; dom.dlgText.textContent = w.text;
+    const wire = (btn, [label, fn]) => { btn.textContent = label; btn.onclick = () => { close(); fn?.(); }; };
+    wire(dom.dlgOk, first); wire(dom.dlgAlt, second);
+    dom.dlg.hidden = false; dom.dlgOk.focus();
+  }
+  function close() { dom.dlg.hidden = true; dialogOpen = false; }
+  dom.dlg.addEventListener('keydown', e => { if (e.key === 'Escape') dom.dlgOk.click(); });
+  const view = () => ({ ...world, objectsInside: Object.values(world.objects).filter(o => o.inside).length });
+  function run(k) {
+    const wasOpen = world.doorOpen;
+    if (k === 'bottle' || k === 'glass') ACT.object(k); else ACT[k]?.();
+    if (k === 'door' && wasOpen && !world.doorOpen) {
+      const w = afterDoorClosed(view(), sim.snap());
+      if (w) ask(w, ['Lock it', () => { world.locked = true; say('Door locked', 1800); }], ['Leave unlocked', null]);
+    }
+  }
+  function tryAct(k) {
+    const w = checkAction(k, view(), sim.snap());
+    if (w) ask(w, ['Go back', null], ['Do it anyway', () => run(k)]);
+    else run(k);
+  }
+
+  // ---------- auto camera: frame the part the current step needs ----------
+  const wpos = o => o.getWorldPosition(V(0, 0, 0));
+  function frameStep(i) {
+    const mid = (a, b) => wpos(a).add(wpos(b)).multiplyScalar(0.5);
+    const look = (t, off) => flyTo(t.clone().add(off), t);
+    switch (i) {
+      case 0: return look(wpos(parts.power), V(16, 9, -34));                       // power switch, back of the controller
+      case 1: return look(wpos(parts.btnLow), V(14, 4, 38));                       // lock and door
+      case 2: return look(mid(items.bottle, parts.grill).add(V(0, 3, 0)), V(-12, 24, 50));
+      case 3: case 10: case -1: { const t = controlsPos(); return look(t, V(0, 2.5, 22)); }   // keypad + OLED
+      case 4: return look(mid(parts.water, parts.grill).add(V(0, 3, 0)), V(-12, 24, 50));
+      case 5: return look(mid(parts.cup, parts.pad).add(V(0, 3, 0)), V(14, 24, 46));
+      case 6: case 8: return setView('front');
+      case 7: return look(wpos(parts.cup), V(12, 16, 32));
+      case 9: return setView('iso');
+      case 11: return look(mid(items.bottle, items.glass).add(V(0, 4, 0)), V(-6, 10, 34));
+    }
+  }
+
   // ---------- picking ----------
   const ray = new THREE.Raycaster(), ndc = new THREE.Vector2();
+  ray.params.Line.threshold = 0.05;                     // edge outlines must not swallow clicks
   function pick(e) {
     const r = stage.getBoundingClientRect();
     ndc.set(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1);
@@ -250,31 +299,43 @@ export function startPlay({ THREE, scene, camera, stage, parts, M, solid, flyTo,
   const controlsPos = () => keypadMesh.getWorldPosition(V(0, 0, 0)).add(oledMesh.getWorldPosition(V(0, 0, 0))).multiplyScalar(0.5);
   const near = () => camera.position.distanceTo(controlsPos()) < 40;
 
-  let down = null, heldKey = null;
+  // One key at a time, tied to the pointer (finger) that pressed it.
+  let down = null, heldKey = null, heldPointer = null;
+  // Audio may only start from a real user gesture: a touch pointerdown is not one, a pointerup is.
+  const wakeAudio = () => {
+    if (!audio) try { audio = new AudioContext(); } catch (_) { audio = null; }
+    if (audio && audio.state === 'suspended') audio.resume().catch(() => {});
+  };
   const onDown = e => {
     if (e.button !== 0) return;
-    if (!audio) try { audio = new AudioContext(); } catch (_) { audio = null; }
+    wakeAudio();
     const p = pick(e); if (!p) return;
     if (p.kind === 'keypad' || p.kind === 'oled') {
       e.stopPropagation(); e.preventDefault();
+      if (heldKey) return;                                  // a second finger on the keypad is ignored
       if (!near()) { const t = controlsPos(); flyTo(t.clone().add(V(0, 2.5, 22)), t); return; }
       const k = p.kind === 'keypad' && keyAt(p.h);
-      if (k) { heldKey = k; panel.key(k, true, performance.now()); keypadMesh.position.z -= 0.04; stage.setPointerCapture(e.pointerId); }
+      if (k) {
+        heldKey = k; heldPointer = e.pointerId; panel.key(k, true, performance.now());
+        keypadMesh.position.z -= 0.04; stage.setPointerCapture(e.pointerId);
+      }
       return;
     }
-    down = { kind: p.kind, x: e.clientX, y: e.clientY };
+    down = { kind: p.kind, x: e.clientX, y: e.clientY, id: e.pointerId };
   };
-  const release = () => {
-    if (heldKey) { panel.key(heldKey, false, performance.now()); keypadMesh.position.z += 0.04; heldKey = null; }
+  // cancelled: the OS took the touch away; let go of the key without it counting as a tap.
+  const release = (cancelled = false) => {
+    if (!heldKey) return;
+    if (cancelled) panel.cancel(heldKey); else panel.key(heldKey, false, performance.now());
+    keypadMesh.position.z += 0.04; heldKey = null; heldPointer = null;
   };
   const onUp = e => {
-    if (heldKey) return release();
-    if (down && Math.hypot(e.clientX - down.x, e.clientY - down.y) < 6) {
-      const k = down.kind;
-      if (k === 'bottle' || k === 'glass') ACT.object(k); else ACT[k]?.();
-    }
+    wakeAudio();
+    if (heldKey) { if (e.pointerId === heldPointer) release(); return; }
+    if (down && down.id === e.pointerId && Math.hypot(e.clientX - down.x, e.clientY - down.y) < 6) tryAct(down.kind);
     down = null;
   };
+  const onCancel = e => { if (e.pointerId === heldPointer) release(true); if (down?.id === e.pointerId) down = null; };
   let hoverAt = 0;
   const onMove = e => {
     if (e.buttons || performance.now() - hoverAt < 60) return;
@@ -290,7 +351,9 @@ export function startPlay({ THREE, scene, camera, stage, parts, M, solid, flyTo,
   const noMenu = e => e.preventDefault();
   stage.addEventListener('pointerdown', onDown, true);
   stage.addEventListener('pointerup', onUp, true);
-  stage.addEventListener('pointercancel', release, true);
+  stage.addEventListener('pointercancel', onCancel, true);
+  stage.addEventListener('lostpointercapture', onCancel);
+  window.addEventListener('blur', () => release(true));
   stage.addEventListener('pointermove', onMove);
   stage.addEventListener('pointerleave', onLeave);
   stage.addEventListener('contextmenu', noMenu);
@@ -300,25 +363,40 @@ export function startPlay({ THREE, scene, camera, stage, parts, M, solid, flyTo,
     speed = +b.dataset.speed; dom.speed.forEach(x => x.setAttribute('aria-pressed', String(x === b)));
   }));
   dom.fault.addEventListener('change', () => sim.fault(dom.fault.value || null));
-  dom.reset.addEventListener('click', () => { reset(); place(true); });
+  dom.reset.addEventListener('click', () => { reset(); place(true); lastStep = null; });
 
   // ---------- per frame ----------
   const tmp = V(0, 0, 0), up = V(0, 1, 0);
-  let lastOled = -1, lastUi = 0;
+  let lastOled = -1, lastUi = 0, lastStep = null, prevState = 'Off';
   function frame(dtMs) {
-    const now = performance.now(), dt = Math.min(dtMs, 250), simDt = dt * speed / 1000;
+    const now = performance.now(), dt = dialogOpen ? 0 : Math.min(dtMs, 250), simDt = dt * speed / 1000;
     const { ev, click } = panel.poll(now);
-    sim.input(ev);
-    sim.advance(dt, speed);
+    if (!dialogOpen) {                                   // a warning popup pauses everything
+      const w = checkKey(ev, view(), sim.snap());
+      if (w) ask(w, ['Go back', null], ['Do it anyway', () => sim.input(ev)]);
+      else sim.input(ev);
+      sim.advance(dt, speed);
+    }
     const s = sim.snap();
-    for (const ms of beeper.update(s.on && !s.booting ? s.state : 'Off', now, click && s.on)) beep(ms);
+    if (prevState === 'Ready' && s.state === 'Idle') say('STEP 4 ended: heater off. Nobody pressed a key for 10 min (or SEL was held). Start again.', 7000);
+    prevState = s.state;
+    if (s.state === 'Complete') world.cycleDone = true;
+    if (s.state === 'StepWater') world.cycleDone = false;
+    const step = currentStep(view(), s);
+    if (step !== lastStep) {
+      lastStep = step;
+      if (dom.autoCam.checked && !down && !heldKey && step < STEPS.length) frameStep(step);
+    }
+    for (const ms of beeper.update(s.on && !s.booting ? s.state : 'Off', now, click && s.on && !s.booting)) beep(ms);
     if (world.touchedHot && now > world.touchedUntil) world.touchedHot = false;
 
     // Door: hinged along its bottom edge, drops forward to lie flat (like an oven door).
     world.doorT += ((world.doorOpen ? 1 : 0) - world.doorT) * (reduceMotion ? 1 : Math.min(1, dt / 120));
     const a = world.doorT * Math.PI / 2, hinge = V(0, g.floorY, g.front);
+    const exZ = parts.door.position.z * (world.doorT === 0 ? 1 : 0);   // exploded view pulls the closed door forward
     parts.door.rotation.x = a;
     parts.door.position.copy(hinge).sub(hinge.clone().applyAxisAngle(V(1, 0, 0), a));
+    parts.door.position.z += exZ;
     parts.lock.position.y = world.locked ? 0 : 0.5;
     parts.rocker.rotation.x = s.on ? -0.22 : 0.22;
 
@@ -381,10 +459,20 @@ export function startPlay({ THREE, scene, camera, stage, parts, M, solid, flyTo,
     }
   }
   function ui(s) {
-    const w = { ...world, objectsInside: Object.values(world.objects).filter(o => o.inside).length };
+    const w = view();
     const lines = hints(w, s);
     if (transient.text && performance.now() < transient.until) lines.unshift(transient.text);
     dom.next.textContent = nextStep(w, s);
+    const cur = currentStep(w, s);
+    if (cur !== dom.steps.dataset.cur) {
+      dom.steps.dataset.cur = cur;
+      dom.steps.replaceChildren(...STEPS.map((t, i) => {
+        const li = document.createElement('li'); li.textContent = t;
+        li.className = cur >= STEPS.length || i < cur ? 'done' : i === cur ? 'cur' : '';
+        if (i === cur) li.setAttribute('aria-current', 'step');
+        return li;
+      }));
+    }
     dom.coach.replaceChildren(...lines.map(l => Object.assign(document.createElement('li'), { textContent: l })));
     dom.coach.hidden = lines.length === 0;
     const pr = Object.entries(world.objects).map(([k, o]) => `${NAMES[k]} ${Math.round(Math.min(2, o.exposure) * 100)} %`).join(' · ');
@@ -396,14 +484,13 @@ export function startPlay({ THREE, scene, camera, stage, parts, M, solid, flyTo,
   return {
     frame,
     attach,                                   // after a size change rebuilt the model
-    stop() { M.oled.map = staticOled; scene.remove(fx); },
     // Fly the camera close to the two test objects to watch the prints develop.
     closeUp() {
       const t = items.bottle.getWorldPosition(V(0, 0, 0)).add(items.glass.getWorldPosition(V(0, 0, 0))).multiplyScalar(0.5).add(V(0, 5, 0));
       flyTo(t.clone().add(V(0, 2, 20)), t);
     },
     // For scripted checks: click a part by kind, press/release a key, read state.
-    act(kind) { (kind === 'bottle' || kind === 'glass') ? ACT.object(kind) : ACT[kind](); },
+    act(kind) { tryAct(kind); },
     key(name, isDown) { panel.key(name, isDown, performance.now()); },
     state: () => ({ snap: sim.snap(), world: JSON.parse(JSON.stringify(world)), next: dom.next.textContent }),
     setSpeed(x) { speed = x; },

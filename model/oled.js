@@ -141,7 +141,7 @@ function heating(g, s, f) {
   let x = g.text(10, 0, s.tempC.toFixed(1), 2); x = g.text(x + 1, 0, '°'); g.text(x, 0, 'C');
   thermo(g, 11, 16, thermoLevel(s.targetC)); g.text(22, 19, `set ${Math.trunc(s.targetC)}°C`);
   chip(g, pre ? 'HEAT' : 'RUN');
-  if (s.heaterOn) g.bmp(116, 13, FLAME[f % 2]); else g.bmp(116, 13, FLAME[f % 2].map(r => r.replace(/#(.)/g, '#.')));
+  if (s.heaterCmd) g.bmp(116, 13, FLAME[f % 2]); else g.bmp(116, 13, FLAME[f % 2].map(r => r.replace(/#(.)/g, '#.')));
   if (pre && Math.floor(f / 6) % 2 === 1) {
     g.rfill(0, 30, W, 16); noDrop(g, 3, 33, 0); g.text(18, 31, "DON'T ADD", 1, 0); g.text(18, 38, 'CYANOACRYLATE YET', 1, 0);
   } else if (pre) { chevrons(g, 0, 31, f); x = g.text(12, 31, mmss(s.preheatElapsedMs), 2); g.text(x + 3, 39, 'warm'); }

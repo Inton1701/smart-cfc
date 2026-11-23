@@ -1,6 +1,6 @@
 // Self-check for sim.js. Run: node model/sim-check.js  (exit 1 on any failure)
 import assert from 'node:assert/strict';
-import { C, createSim, createPanel, createBeeper, hints, nextStep } from './sim.js';
+import { C, createSim, createPanel, createBeeper, hints, nextStep, STEPS, currentStep, checkAction, checkKey, afterDoorClosed } from './sim.js';
 
 const tests = [];
 const test = (name, fn) => tests.push([name, fn]);
@@ -101,6 +101,15 @@ test('heater stuck on -> OVERTEMP; rearm only below 150 C', () => {
   tap(s); assert.equal(s.snap().state, 'Idle');
 });
 
+test('stuck heater: OLED flame follows the commanded output, not the real heat', () => {
+  const s = ready(); tap(s); s.fault('heaterStuck');
+  assert.ok(until(s, x => x.tempC > 150, 20 * MIN));
+  const x = s.snap();
+  assert.equal(x.heaterOn, true, 'plate is still being heated');
+  assert.equal(x.heaterCmd, false, 'controller has commanded the heater off');
+  assert.match(oledText(x, 0).join('|'), /RUN/);
+});
+
 test('power off cuts everything, even a stuck heater', () => {
   const s = heating(); s.fault('heaterStuck'); run(s, 1000);
   s.power(false);
@@ -154,6 +163,13 @@ test('panel: sel held 1 s fires selHold once and no tap', () => {
   assert.equal(r.ev.selTap, false); assert.equal(r.ev.anyTap, false);
 });
 
+test('panel: a cancelled press is not a tap', () => {
+  const p = createPanel();
+  p.key('sel', true, 0); p.poll(0);
+  p.cancel('sel'); const r = p.poll(300);
+  assert.equal(r.ev.selTap, false); assert.equal(r.ev.anyTap, false); assert.equal(p.isDown('sel'), false);
+});
+
 test('panel: inc steps on press, repeats after 500 ms every 120 ms', () => {
   const p = createPanel(); let n = 0;
   p.key('inc', true, 0);
@@ -200,7 +216,71 @@ test('next step guides the whole procedure', () => {
   assert.match(N({ drops: 3, locked: false }, S('Ready')), /lock/i);
   assert.match(N({ drops: 3 }, S('Ready')), /any key/i);
   assert.match(N({ drops: 3 }, S('Complete')), /any key/i);
-  assert.match(N({}, S('SafetyTrip')), /power/i);
+  assert.match(N({}, S('SafetyTrip')), /stuck/i);
+});
+
+test('procedure: current step follows the cycle', () => {
+  const at = (w, s) => currentStep(W(w), s);
+  assert.equal(STEPS.length, 12);
+  assert.equal(at({}, { on: false, state: 'Off' }), 0);
+  assert.equal(at({ objectsInside: 0, doorOpen: false }, S('Idle')), 1);
+  assert.equal(at({ objectsInside: 0, doorOpen: true }, S('Idle')), 2);
+  assert.equal(at({ objectsInside: 2, doorOpen: true }, S('Idle')), 3);
+  assert.equal(at({}, S('StepWater')), 4);
+  assert.equal(at({}, S('StepCup')), 5);
+  assert.equal(at({}, S('Preheat')), 6);
+  assert.equal(at({ drops: 0 }, S('Ready')), 7);
+  assert.equal(at({ drops: 4 }, S('Ready')), 8);
+  assert.equal(at({ drops: 4 }, S('Running')), 9);
+  assert.equal(at({ cycleDone: true }, S('Complete')), 10);
+  assert.equal(at({ cycleDone: true, objectsInside: 2 }, S('Idle')), 11);
+  assert.equal(at({ cycleDone: true, objectsInside: 0 }, S('Idle')), 12);   // all done
+  assert.equal(at({}, S('Fault')), -1);
+});
+
+test('warnings before a wrong action', () => {
+  const chk = (k, w, s) => checkAction(k, W(w), s);
+  assert.match(chk('cyano', {}, S('Preheat')).title, /heating/i);
+  assert.match(chk('cyano', {}, S('StepCup')).title, /cold/i);
+  assert.match(chk('cyano', {}, { on: false, state: 'Off' }).title, /cold/i);
+  assert.equal(chk('cyano', {}, S('Ready')), null);
+  assert.match(chk('door', { doorOpen: false, locked: false }, S('Running')).title, /fuming/i);
+  assert.equal(chk('door', { doorOpen: false, locked: false }, S('Preheat')), null);
+  assert.equal(chk('door', { doorOpen: true }, S('Running')), null);          // closing is always fine
+  assert.match(chk('power', {}, S('Running')).title, /cycle/i);
+  assert.equal(chk('power', {}, S('Idle')), null);
+  assert.match(chk('push', { locked: true }, S('Preheat')).title, /locked/i);
+  assert.match(chk('push', { locked: true }, S('Running')).title, /locked/i);
+  assert.equal(chk('push', { locked: false }, S('Preheat')), null);          // locking is always fine
+  assert.equal(chk('push', { locked: true }, S('Ready')), null);             // opening to add drops
+  assert.ok(hints(W({ locked: false }), S('Preheat')).some(h => /lock/i.test(h)));
+  assert.ok(hints(W({ doorOpen: true, locked: false }), S('Preheat')).some(h => /close/i.test(h)));
+  assert.match(nextStep(W({ doorOpen: true, locked: false }), S('Preheat')), /close/i);
+  assert.match(nextStep(W({ locked: false }), S('Preheat')), /lock/i);
+  assert.match(chk('water', { water: true }, S('Running')).title, /water/i);
+  assert.equal(chk('water', { water: false }, S('StepWater')), null);
+});
+
+test('warnings before a key starts the next stage', () => {
+  const tapEv = { anyTap: true }, holdEv = { selHold: true };
+  const ks = (ev, w, s) => checkKey(ev, W(w), s);
+  assert.match(ks(holdEv, { objectsInside: 0 }, S('Idle')).title, /test object/i);
+  assert.equal(ks(holdEv, { objectsInside: 1 }, S('Idle')), null);
+  assert.match(ks(tapEv, { water: false }, S('StepWater')).title, /water/i);
+  assert.match(ks(tapEv, { cup: false }, S('StepCup')).title, /cup/i);
+  assert.match(ks(tapEv, { drops: 0 }, S('Ready')).title, /cyanoacrylate/i);
+  assert.match(ks(tapEv, { drops: 4, doorOpen: true, locked: false }, S('Ready')).title, /door open/i);
+  assert.match(ks(tapEv, { drops: 4, doorOpen: false, locked: false }, S('Ready')).title, /not locked/i);
+  assert.equal(ks(tapEv, { drops: 4 }, S('Ready')), null);
+  assert.equal(ks(holdEv, { drops: 4, doorOpen: true }, S('Ready')), null);   // SEL hold cancels: always allowed
+  assert.equal(ks({ incStep: true }, {}, S('Idle')), null);
+});
+
+test('closing the door without locking it', () => {
+  assert.match(afterDoorClosed(W({ locked: false }), S('Preheat')).title, /not locked/i);
+  assert.match(afterDoorClosed(W({ locked: false, drops: 4 }), S('Ready')).title, /not locked/i);
+  assert.equal(afterDoorClosed(W({ locked: true }), S('Preheat')), null);
+  assert.equal(afterDoorClosed(W({ locked: false }), S('Idle')), null);
 });
 
 test('constants match firmware 1.0.13', () => {

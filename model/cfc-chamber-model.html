@@ -29,7 +29,8 @@ h1 { font: 600 26px/1.1 var(--f-display); letter-spacing: .01em; margin: 0; text
 .bench { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 14px; align-items: start; }
 @media (max-width: 860px) { .bench { grid-template-columns: minmax(0, 1fr); } }
 .stage { position: relative; background: var(--stage); border: 1px solid var(--line); border-radius: 8px;
-  aspect-ratio: 4 / 3; max-width: 100%; overflow: hidden; touch-action: none; }
+  aspect-ratio: 4 / 3; max-width: 100%; overflow: hidden; touch-action: none;
+  user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
 .stage canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
 #overlay { pointer-events: none; }
 .hint { position: absolute; left: 10px; bottom: 8px; font: 12px var(--f-mono); color: #66737a; pointer-events: none; }
@@ -65,6 +66,22 @@ button.primary { background: var(--accent); color: var(--accent-ink); border-col
 :root[data-theme="dark"] .coach { background: #3a2a12; color: #ffd9a0; border-color: #6b4a1c; }
 .tip { position: absolute; pointer-events: none; font: 600 12px var(--f-body); padding: 3px 7px; border-radius: 4px;
   background: rgba(20, 28, 32, .88); color: #fff; white-space: nowrap; }
+.steps { margin: 0; padding-left: 22px; display: grid; gap: 3px; font-size: 13px; }
+.steps li { color: var(--mute); }
+.steps li.done { color: var(--mute); text-decoration: line-through; text-decoration-color: var(--line); }
+.steps li.done::marker { content: '✓  '; color: var(--accent); }
+.steps li.cur { color: var(--fg); font-weight: 600; }
+.steps li.cur::marker { color: var(--accent); }
+details.howto { font-size: 13px; color: var(--mute); }
+details.howto summary { cursor: pointer; color: var(--fg); font-weight: 500; }
+details.howto ul { margin: 6px 0 0; padding-left: 18px; display: grid; gap: 3px; }
+.dlg { position: absolute; inset: 0; display: grid; place-items: center; background: rgba(10, 16, 20, .45); padding: 16px; }
+.dlg .box { max-width: 380px; background: var(--panel); color: var(--fg); border: 1px solid var(--line); border-top: 4px solid #d98a1c;
+  border-radius: 8px; padding: 14px 16px; display: grid; gap: 10px; box-shadow: 0 10px 30px rgba(0,0,0,.25); }
+.dlg h3 { margin: 0; font: 600 17px var(--f-body); }
+.dlg h3::before { content: '⚠ '; color: #d98a1c; }
+.dlg p { margin: 0; line-height: 1.45; }
+.dlg .row { display: flex; gap: 8px; justify-content: flex-end; flex-wrap: wrap; }
 .speed { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
 .field { display: grid; gap: 4px; font-size: 13px; }
 .field select { font: 13px var(--f-body); padding: 5px 6px; border: 1px solid var(--line); border-radius: 5px; background: var(--bg); color: var(--fg); }
@@ -87,12 +104,35 @@ body.render { padding: 0; background: #fff; }
         <canvas id="overlay"></canvas>
         <span class="hint">click a part to use it · drag: rotate · scroll/pinch: zoom</span>
         <span class="tip" id="sim-tip" hidden></span>
+        <div class="dlg" id="sim-dlg" role="alertdialog" aria-modal="true" aria-labelledby="sim-dlg-t" aria-describedby="sim-dlg-x" hidden>
+          <div class="box">
+            <h3 id="sim-dlg-t"></h3>
+            <p id="sim-dlg-x"></p>
+            <div class="row"><button id="sim-dlg-alt"></button><button class="primary" id="sim-dlg-ok"></button></div>
+          </div>
+        </div>
       </div>
       <p class="next" id="sim-next" aria-live="polite"></p>
       <ul class="coach" id="sim-coach" aria-live="polite" hidden></ul>
     </div>
 
     <aside>
+      <div class="group">
+        <h2>Procedure</h2>
+        <details class="howto">
+          <summary>How to use</summary>
+          <ul>
+            <li>Click a part of the chamber to use it: power switch, lock PUSH buttons, door, water tray, foil cup, cyanoacrylate bottle, test objects.</li>
+            <li>Click the keypad to zoom in, then press the keys. Hold SEL for 1 s to start; tap any key to go on at each step.</li>
+            <li>Follow the list below. The camera moves to the next part (untick Auto camera to stop that).</li>
+            <li>A warning pops up before a mistake: Go back, or Do it anyway to see what happens.</li>
+            <li>Use 60× to skip the waiting.</li>
+          </ul>
+        </details>
+        <ol class="steps" id="sim-steps"></ol>
+        <label class="toggles" for="sim-autocam" style="display:flex;gap:8px;align-items:center;cursor:pointer"><input id="sim-autocam" type="checkbox" checked> Auto camera</label>
+      </div>
+
       <div class="group">
         <h2>Simulator</h2>
         <div class="speed" role="group" aria-label="Speed">
@@ -170,7 +210,6 @@ body.render { padding: 0; background: #fff; }
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
-import { startPlay } from 'play';
 
 // ---------- sizes (cm), estimated from the photos and the materials list ----------
 const DEF = { boxW: 40, boxD: 28, boxH: 27, legH: 10, grillW: 25, grillD: 26, grillH: 5, padW: 8, padD: 10,
@@ -802,7 +841,10 @@ if (RENDER) {
   }
 }
 if (!RENDER) {
-  play = startPlay({ THREE, scene, camera, stage, parts, M, solid, flyTo, dom: {
+  const { startPlay } = await import('play');   // figure mode never loads the simulator
+  play = startPlay({ THREE, scene, camera, stage, parts, M, solid, flyTo, setView, dom: {
+    steps: $('sim-steps'), autoCam: $('sim-autocam'),
+    dlg: $('sim-dlg'), dlgTitle: $('sim-dlg-t'), dlgText: $('sim-dlg-x'), dlgOk: $('sim-dlg-ok'), dlgAlt: $('sim-dlg-alt'),
     next: $('sim-next'), coach: $('sim-coach'), tip: $('sim-tip'), readout: $('sim-readout'),
     fault: $('sim-fault'), reset: $('sim-reset'), speed: [...document.querySelectorAll('[data-speed]')] } });
   afterBuild = () => play.attach();
