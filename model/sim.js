@@ -276,3 +276,33 @@ export function hints(world, snap) {
   if (world.touchedHot) out.push('PLATE HOT: let it cool before touching');
   return out;
 }
+
+// The one thing to do next, following the manual's procedure (chapter 6).
+export function nextStep(world, snap) {
+  const open = world.doorOpen, s = snap.on ? snap.state : 'Off';
+  const toOpen = world.locked ? 'Press PUSH on the lock, then click the door to open it' : 'Click the door to open it';
+  switch (s) {
+    case 'Off': return 'Turn on the power switch (back of the controller)';
+    case 'Idle':
+      if (snap.booting) return 'Starting…';
+      if (world.objectsInside === 0) return open ? 'Put a test object in the chamber (click the bottle or glass)' : toOpen;
+      return 'Set TEMP and TIME with the keys, then hold SEL for 1 s to start';
+    case 'StepWater':
+      if (!world.water) return open ? 'Put the hot water tray in the chamber, then press any key' : toOpen;
+      return 'Press any key';
+    case 'StepCup':
+      if (!world.cup) return open ? 'Put the empty foil cup on the heating plate, then press any key' : toOpen;
+      return 'Press any key to start heating';
+    case 'Preheat': return "Plate heating: don't add cyanoacrylate yet";
+    case 'Ready':
+      if (world.drops === 0) return open ? 'Add cyanoacrylate to the cup (click the bottle)' : toOpen;
+      if (open) return 'Close the door';
+      if (!world.locked) return 'Lock the door (press PUSH)';
+      return 'Press any key to start fuming';
+    case 'Running': return 'Fuming: keep the door closed';
+    case 'Complete': return 'Press any key, then take the objects out somewhere ventilated';
+    case 'Fault': return 'Fix the fault, then press SEL';
+    case 'SafetyTrip': return 'Turn off the power and let it cool below 150 °C, then press SEL';
+  }
+  return '';
+}

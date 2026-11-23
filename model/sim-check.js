@@ -1,6 +1,6 @@
 // Self-check for sim.js. Run: node model/sim-check.js  (exit 1 on any failure)
 import assert from 'node:assert/strict';
-import { C, createSim, createPanel, createBeeper, hints } from './sim.js';
+import { C, createSim, createPanel, createBeeper, hints, nextStep } from './sim.js';
 
 const tests = [];
 const test = (name, fn) => tests.push([name, fn]);
@@ -184,6 +184,23 @@ test('hints name the mistakes', () => {
   assert.ok(hints(W({ drops: 3, doorOpen: true }), S('Running')).some(h => /door/i.test(h)));
   assert.ok(hints(W({ drops: 3, objectsInside: 0 }), S('Running')).some(h => /test object/i.test(h)));
   assert.ok(hints(W({ touchedHot: true }), S('Complete')).some(h => /hot/i.test(h)));
+});
+
+test('next step guides the whole procedure', () => {
+  const N = (w, s) => nextStep(W(w), s);
+  assert.match(N({}, { on: false, state: 'Off' }), /power/i);
+  assert.match(N({ objectsInside: 0, locked: true }, S('Idle')), /PUSH/);
+  assert.match(N({ objectsInside: 0, locked: false, doorOpen: true }, S('Idle')), /test object/i);
+  assert.match(N({ objectsInside: 1, doorOpen: true }, S('Idle')), /hold SEL/i);
+  assert.match(N({ water: false, doorOpen: true }, S('StepWater')), /water/i);
+  assert.match(N({ cup: false, doorOpen: true }, S('StepCup')), /cup/i);
+  assert.match(N({}, S('Preheat')), /don't add/i);
+  assert.match(N({ drops: 0, doorOpen: true }, S('Ready')), /bottle/i);
+  assert.match(N({ drops: 3, doorOpen: true }, S('Ready')), /close the door/i);
+  assert.match(N({ drops: 3, locked: false }, S('Ready')), /lock/i);
+  assert.match(N({ drops: 3 }, S('Ready')), /any key/i);
+  assert.match(N({ drops: 3 }, S('Complete')), /any key/i);
+  assert.match(N({}, S('SafetyTrip')), /power/i);
 });
 
 test('constants match firmware 1.0.13', () => {

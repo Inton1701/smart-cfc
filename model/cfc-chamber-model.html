@@ -1,3 +1,4 @@
+<meta charset="utf-8">
 <title>Smart CFC Chamber Model</title>
 <meta name="claude:viewport-fit-sides" content="cover">
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -54,9 +55,22 @@ button.primary { background: var(--accent); color: var(--accent-ink); border-col
 .shot img { border: 1px solid var(--line); border-radius: 4px; background: #fff; }
 .shot p { margin: 0; color: var(--mute); }
 .note { font-size: 12px; color: var(--mute); margin: 0; }
+.col { display: grid; gap: 8px; min-width: 0; }
+.next { margin: 0; padding: 8px 12px; border-radius: 6px; background: var(--panel); border: 1px solid var(--line);
+  border-left: 4px solid var(--accent); font-weight: 600; }
+.next::before { content: 'Next: '; color: var(--mute); font-weight: 500; }
+.coach { margin: 0; padding: 8px 12px 8px 30px; border-radius: 6px; background: #fff4e5; color: #6b3b00;
+  border: 1px solid #f0c98a; display: grid; gap: 2px; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) .coach { background: #3a2a12; color: #ffd9a0; border-color: #6b4a1c; } }
+:root[data-theme="dark"] .coach { background: #3a2a12; color: #ffd9a0; border-color: #6b4a1c; }
+.tip { position: absolute; pointer-events: none; font: 600 12px var(--f-body); padding: 3px 7px; border-radius: 4px;
+  background: rgba(20, 28, 32, .88); color: #fff; white-space: nowrap; }
+.speed { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+.field { display: grid; gap: 4px; font-size: 13px; }
+.field select { font: 13px var(--f-body); padding: 5px 6px; border: 1px solid var(--line); border-radius: 5px; background: var(--bg); color: var(--fg); }
 /* #render;...: bare full-window stage for making manual figures */
 body.render { padding: 0; background: #fff; }
-.render header, .render aside, .render .shot, .render .hint { display: none !important; }
+.render header, .render aside, .render .shot, .render .hint, .render .next, .render .coach { display: none !important; }
 .render .stage { position: fixed; inset: 0; border: 0; border-radius: 0; aspect-ratio: auto; background: #fff; }
 </style>
 
@@ -67,13 +81,37 @@ body.render { padding: 0; background: #fff; }
   </header>
 
   <div class="bench">
-    <div class="stage" id="stage">
-      <canvas id="gl"></canvas>
-      <canvas id="overlay"></canvas>
-      <span class="hint">drag: rotate · scroll/pinch: zoom · right-drag: pan</span>
+    <div class="col">
+      <div class="stage" id="stage">
+        <canvas id="gl"></canvas>
+        <canvas id="overlay"></canvas>
+        <span class="hint">click a part to use it · drag: rotate · scroll/pinch: zoom</span>
+        <span class="tip" id="sim-tip" hidden></span>
+      </div>
+      <p class="next" id="sim-next" aria-live="polite"></p>
+      <ul class="coach" id="sim-coach" aria-live="polite" hidden></ul>
     </div>
 
     <aside>
+      <div class="group">
+        <h2>Simulator</h2>
+        <div class="speed" role="group" aria-label="Speed">
+          <button data-speed="1" aria-pressed="false">1×</button>
+          <button data-speed="10" aria-pressed="true">10×</button>
+          <button data-speed="60" aria-pressed="false">60×</button>
+        </div>
+        <label class="field" for="sim-fault">Practice fault
+          <select id="sim-fault">
+            <option value="">None</option>
+            <option value="probeOff">Probe off the plate</option>
+            <option value="probeUnplugged">Probe unplugged</option>
+            <option value="heaterStuck">Heater stuck on</option>
+          </select>
+        </label>
+        <div class="readout" id="sim-readout"></div>
+        <button id="sim-reset">Restart</button>
+      </div>
+
       <div class="group">
         <h2>View</h2>
         <div class="views" id="views">
@@ -89,7 +127,7 @@ body.render { padding: 0; background: #fff; }
       <div class="group">
         <h2>Show</h2>
         <div class="toggles">
-          <label for="t-labels"><input id="t-labels" type="checkbox" checked> Part labels</label>
+          <label for="t-labels"><input id="t-labels" type="checkbox"> Part labels</label>
           <label for="t-explode"><input id="t-explode" type="checkbox"> Exploded view</label>
           <label for="t-cup"><input id="t-cup" type="checkbox" checked> Foil cup</label>
           <label for="t-water"><input id="t-water" type="checkbox" checked> Water tray</label>
@@ -129,6 +167,7 @@ body.render { padding: 0; background: #fff; }
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
+import { startPlay } from 'play';
 
 // ---------- sizes (cm), estimated from the photos and the materials list ----------
 const DEF = { boxW: 40, boxD: 28, boxH: 27, legH: 10, grillW: 25, grillD: 26, grillH: 5, padW: 8, padD: 10,
@@ -315,6 +354,7 @@ const M = {
 let model = null;
 const parts = {};
 let labels = [];
+let afterBuild = null;   // set by the simulator: re-attach after a size change
 
 function build() {
   if (model) { scene.remove(model); model.traverse(n => { if (n.geometry) n.geometry.dispose(); }); }
@@ -357,7 +397,8 @@ function build() {
   const lockX = 0, podW = 3.2, podL = 4.6, podT = 1.5;
   const lock = new THREE.Group();
   const topPodZ = front - 4.2;
-  lock.add(solid(new RoundedBoxGeometry(podW, podT, podL, 3, 0.6), M.white, lockX, topY + podT / 2, topPodZ));
+  const roofPod = solid(new RoundedBoxGeometry(podW, podT, podL, 3, 0.6), M.white, lockX, topY + podT / 2, topPodZ);
+  lock.add(roofPod);
   const btnTop = solid(new RoundedBoxGeometry(1.6, 0.3, 2.4, 2, 0.12), M.push, lockX, topY + podT + 0.05, topPodZ);
   btnTop.rotation.y = Math.PI / 2; btnTop.rotation.z = 0;
   lock.add(btnTop);
@@ -365,7 +406,8 @@ function build() {
   lock.add(solid(new THREE.BoxGeometry(2.0, 7.2, 0.18), M.white, lockX, topY - 3.5, front + 0.55));
   const lowPodY = topY - 7.2 - podL / 2 + 0.4;
   lock.add(solid(new RoundedBoxGeometry(podW, podL, podT, 3, 0.6), M.white, lockX, lowPodY, front + 0.55 + podT / 2));
-  lock.add(solid(new RoundedBoxGeometry(1.6, 2.4, 0.3, 2, 0.12), M.push, lockX, lowPodY, front + 0.6 + podT));
+  const btnLow = solid(new RoundedBoxGeometry(1.6, 2.4, 0.3, 2, 0.12), M.push, lockX, lowPodY, front + 0.6 + podT);
+  lock.add(btnLow);
   door.add(lock);
   chamber.add(door);
 
@@ -422,7 +464,8 @@ function build() {
     pad.add(solid(new THREE.CylinderGeometry(0.85, 0.95, feetH, 24), M.steel, px + sx * fx, woodTop + feetH / 2, pz + sz * fz));
     pad.add(solid(new THREE.CylinderGeometry(0.32, 0.32, 0.12, 12), M.steel, px + sx * fx, plateTop + 0.06, pz + sz * fz));
   }
-  pad.add(solid(new THREE.BoxGeometry(padW, plateT, padD), M.alu, px, plateBot + plateT / 2, pz));
+  const plate = solid(new THREE.BoxGeometry(padW, plateT, padD), M.alu, px, plateBot + plateT / 2, pz);
+  pad.add(plate);
   // Heater element block in the middle of the left edge; its two wires leave from there.
   const edgeX = px - padW / 2;
   pad.add(solid(new THREE.BoxGeometry(2.4, 0.5, 3.2), M.kapton, edgeX + 1.3, plateBot - 0.25, pz));
@@ -494,7 +537,8 @@ function build() {
   ctrl.add(keypad);
   const power = new THREE.Group();
   power.add(solid(new RoundedBoxGeometry(2.9, 4.6, 0.6, 2, 0.15), M.rubber, 0, 0, -0.3));
-  power.add(solid(new RoundedBoxGeometry(2.3, 1.6, 0.6, 2, 0.12), M.switchRed, 0, 1.25, -0.75));
+  const rocker = solid(new RoundedBoxGeometry(2.3, 1.6, 0.6, 2, 0.12), M.switchRed, 0, 1.25, -0.75);
+  power.add(rocker);
   power.add(solid(new THREE.BoxGeometry(2.0, 0.8, 0.12), M.mount, 0, -0.05, -0.64));
   power.add(solid(new RoundedBoxGeometry(2.1, 1.2, 0.14, 2, 0.4), M.black, 0, -1.45, -0.62));
   for (const sx of [-1, 1]) power.add(solid(new THREE.CylinderGeometry(0.32, 0.32, 0.1, 16).rotateX(Math.PI / 2), M.rubber, sx * 0.45, -1.45, -0.7));
@@ -504,7 +548,10 @@ function build() {
   model.add(chamber, base, ctrl);
   scene.add(model);
   Object.assign(parts, { chamber, base, ctrl, door, cup, water, shell, lock, hang, grill, pad, probe, oled, keypad, power,
-    legs: base });
+    legs: base, plate, roofPod, btnTop, btnLow, rocker });
+  // Positions the simulator needs (chamber coordinates, cm).
+  parts.geom = { W, D, H, floorY, topY, front, px, pz, padW, padD, plateTop, gx, gz, hx, hz, gTop, wr,
+    trayPos: water.position.clone(), cupPos: cup.position.clone(), cy, cf, ow, ks, lockX };
 
   const L = (text, obj, x, y, z) => labels.push({ text, obj, p: V(x, y, z) });
   L('Clear acrylic chamber', chamber, -W / 2, floorY + H * 0.72, D / 2 - r - 2);
@@ -530,6 +577,7 @@ function build() {
   L('Power switch and inlet', power, 1.45, 0, -0.6);
 
   applyToggles();
+  if (afterBuild) afterBuild();
   document.getElementById('overall').textContent =
     `Overall ${fmt(W)} × ${fmt(D + 2.2)} × ${fmt(topY + 1.5)} cm (W × D × H)`;
 }
@@ -588,6 +636,9 @@ function setView(name, instant = false) {
   camAnim = { t0: performance.now(), fromPos: camera.position.clone(), fromT: controls.target.clone(), to };
 }
 $('views').addEventListener('click', e => { const b = e.target.closest('button'); if (b) setView(b.dataset.view); });
+function flyTo(pos, target) {
+  camAnim = { t0: performance.now(), fromPos: camera.position.clone(), fromT: controls.target.clone(), to: { pos, target } };
+}
 
 // ---------- labels (drawn on a 2D canvas so pictures include them) ----------
 const tmp = new THREE.Vector3(), ray = new THREE.Raycaster(), rayDir = new THREE.Vector3();
@@ -655,7 +706,9 @@ function placeExploded() {
   parts.door.position.z = explode * 12;
   parts.ctrl.position.set(0, -explode, explode * 22);
 }
+let play = null, lastT = 0;
 function frame(now) {
+  const dt = lastT ? now - lastT : 16; lastT = now;
   if (camAnim) {
     const k = Math.min(1, (now - camAnim.t0) / 650), e = 1 - Math.pow(1 - k, 3);
     camera.position.lerpVectors(camAnim.fromPos, camAnim.to.pos, e);
@@ -665,6 +718,7 @@ function frame(now) {
   explode += (explodeTarget - explode) * (reduceMotion ? 1 : 0.12);
   if (parts.chamber) placeExploded();
   controls.update();
+  if (play) play.frame(dt);
   renderer.render(scene, camera);
   octx.clearRect(0, 0, cssW, cssH);
   drawLabels(octx, cssW, cssH);
@@ -743,6 +797,14 @@ if (RENDER) {
     camera.position.sub(controls.target).multiplyScalar(parseFloat(RENDER.zoom)).add(controls.target);
     controls.update();
   }
+}
+if (!RENDER) {
+  play = startPlay({ THREE, scene, camera, stage, parts, M, solid, flyTo, dom: {
+    next: $('sim-next'), coach: $('sim-coach'), tip: $('sim-tip'), readout: $('sim-readout'),
+    fault: $('sim-fault'), reset: $('sim-reset'), speed: [...document.querySelectorAll('[data-speed]')] } });
+  afterBuild = () => play.attach();
+  window.cfcPlay = play;   // handle for scripted checks
+  for (const id of ['t-cup', 't-water']) $(id).closest('label').hidden = true;   // the simulator moves them
 }
 requestAnimationFrame(frame);
 </script>
